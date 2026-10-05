@@ -1,0 +1,26 @@
+# ROM identity for Doom — the single source of truth.
+#
+# Read by three consumers, so a revision change is made once, here:
+#   - the build   (CMake generates snesrecomp_rom_identity.h from this file)
+#   - tools/regen.sh
+#   - .github/workflows/release.yml
+#
+# Format is `key = value`, one per line; `#` starts a comment. Values may be
+# quoted. Leaving a digest empty means the build cannot verify a ROM it is
+# handed — it will say so rather than accept it.
+
+display_name    = Doom
+rom_file        = doom.sfc
+# Every digest of the bare image (copier header stripped), so the Retro
+# catalog can take a submission's identity from this file rather than ask
+# the submitter to hash the ROM again. The build verifies on crc32/sha256.
+expected_crc32  = 09e85ea6
+expected_md5    = e218531fe541b05cf44c2667e101d117
+expected_sha1   = 736b9b994f506de0893ceb181f942739da089b05
+expected_sha256 = d45e26eb10c323ecd480e5f2326b223e29264c3adde67f48f0d2791128e519e8
+rom_size        = 2097152
+mapping         = lorom
+region          = Y
+# What a mod package's [[target]] game_id must name to apply to this title
+# (snesrecomp/docs/MOD_PACKAGES.md). Stable across revisions on purpose.
+game_id         = doom-y
