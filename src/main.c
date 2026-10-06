@@ -27,6 +27,7 @@
 
 #include "host_main.h"
 #include "game_rtl.h"
+#include "doom_presentation.h"
 #include "snesrecomp_rom_identity.h"  /* generated from rom_identity.txt */
 
 #ifndef __ANDROID__
@@ -56,6 +57,18 @@ static const SnesDesktopHostGame kGameHost = {
     /* Battery-backed SRAM shows the launcher's SAVES panel. Leave NULL for a
      * title without one. The path is exe-relative. */
     .sram_path           = "saves/save.srm",
+    .in_game_launcher    = 1,
+    .on_reset            = DoomPresentationReset,
+    .on_shutdown         = DoomPresentationReset,
+    .before_run_frame    = DoomPresentationBeforeFrame,
+    .prepare_frame       = DoomPresentationPrepare,
+    .begin_sim_frame     = DoomPresentationBegin,
+    .end_sim_frame       = DoomPresentationEnd,
+    .draw_frame          = DoomPresentationDraw,
+    .presentation_hz     = DoomPresentationRate,
+    .keep_pacing_debt    = DoomPresentationKeepDebt,
+    .window_base_width   = DoomPresentationWindowWidth,
+    .compute_viewport    = DoomPresentationViewport,
 };
 
 #ifndef __ANDROID__

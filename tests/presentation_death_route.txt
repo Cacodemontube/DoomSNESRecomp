@@ -1,0 +1,25 @@
+# E1M1: approach the barrel, shoot it to enter the red death presentation,
+# then inspect the host's normal Reset path. The baseline currently goes black
+# after reset and logs architectural BRKs; retain this regression evidence.
+wait 400
+press start 1
+wait 150
+press start 1
+wait 150
+press a 1
+wait 150
+press a 1
+wait 500
+dump gameplay-idle
+press up 120
+press right 90
+press up+left 120
+dump barrel-before-fire
+press y 60
+dump death
+wait 120
+dump death-settle
+reset
+wait 800
+dump reset-post
+quit
