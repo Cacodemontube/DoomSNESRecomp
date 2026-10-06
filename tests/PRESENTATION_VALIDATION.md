@@ -107,3 +107,42 @@ same-build diagnostics containing game state; do not commit or distribute
 them. The probe uses the real Super FX core to reproduce a scene without
 booting the game again. It verifies expected task completions, unchanged
 captured state, identical serial/threaded pictures, and worker stop/restart.
+The floor oracle excludes the two sky coverage sentinels, and the scene sky
+oracle compares every recorded sky pixel with its user-ROM sample. A separate
+oracle executes the retail sky instructions at E375 through their original
+two-PLOT loop and DrawA cache-flush/STOP epilogue. It verifies both resulting
+R5 masks (8000/C000), angles 0000/0040/FFC0/4000, world X from -72 through 287,
+and all 144 rows, including the Y>=128 address borrow. This covers 414720
+pixels independently of the host address calculation and checks the odd-angle
+phase before pixel-pair duplication. Parallel pictures and surface metadata
+must match the serial results byte-for-byte.
+
+For a focused mountain-sky composition fixture, the probe can render the same
+captured E1M1 geometry at private camera `(1536,-3584,42,C000)` through the
+actual `DoomRendererDraw` compositor, at 682x224 with interpolation disabled:
+
+```powershell
+./build-adaptive/doom_renderer_replay_probe.exe $rom ./build-validation/failing-replay.bin --sky-scene 1536 -3584 42 0xC000 ./build-validation/shading-reviewed-329/dumps/gameplay-turn.cgram.bin ./build-validation/sky-scene/after
+python -B tests/check_widescreen_sky.py ./build-validation/sky-scene/after.ppm --oracle ./build-validation/sky-scene/after.sky-oracle.ppm --mask ./build-validation/sky-scene/after.sky-mask.ppm --reference ./build-validation/sky-scene/after.native.ppm
+```
+
+The output directory must already exist. This is a private replay diagnostic,
+not a gameplay input route: it moves only the private camera/player origin,
+preserves the captured GSU/RAM state, omits HUD/weapon, and uses the captured
+undamaged E1M1 CGRAM at native brightness 15 with no fixed-color adjustment.
+The existing local fixture has SHA256
+`C6FD0FB0195F43E9730068BC4E66C917A21F6D9107CAE63DF89D82A0D3C07A30`;
+the CGRAM capture has SHA256
+`F2D6E4B64C565F0A0DCC93D2911175062584CC086492B49F771F6596E5870277`.
+The probe exports the composed picture, independently decoded native center,
+common-camera sky samples, and a black/white real-core surface coverage mask.
+The checker requires exact sky samples only where the private GSU recorded
+sky, allowing walls and opaque objects to occlude it. It checks native and
+side sky separately, rejects an empty/undersized mask, and optionally requires
+the entire 216x144 center world to remain exact. Use the corrected mask/oracle
+when checking a before picture from the same fixture. The pre-fix renderer
+at 95ea528 visibly stretches the mountain panorama at both native joins and
+fails 28580 of 31241 side-sky samples (maximum RGB delta 206). The corrected
+compositor passes all 51507 sky pixels (20266 native, 31241 side) with an
+unchanged native center. Keep these
+same-build fixtures and all exported images in ignored build directories.

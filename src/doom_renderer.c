@@ -15,6 +15,7 @@
 #include "doom_renderer.h"
 #include "doom_projection.h"
 #include "doom_shading.h"
+#include "doom_sky.h"
 
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
@@ -54,7 +55,7 @@ enum {
     kMaxHistoryAge = 120,
     kWallLightScale = 0xcd2c, kObjectLightScale = 0xd425,
     kFloorPlot = 0xe357, kObjectPlotUnique = 0xe478,
-    kObjectPlotRepeat = 0xe4c3,
+    kObjectPlotRepeat = 0xe4c3, kSkyPlot = 0xe3b5,
     kMinPixX = 0x0a, kLightAdjust = 0xce, kSlopeYInverse = 0x200,
     kScaleTableRom = 0x198655, kColorMapsRom = 0x1cde00,
 };
@@ -97,6 +98,8 @@ typedef struct RenderState {
     bool workers_unavailable;
 #endif
     uint8_t pictures[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
+    /* Sector texture pointers identify solid floors/ceilings; the two sky
+     * sentinels identify the original panorama chosen by the private GSU. */
     uint16_t floors[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
     uint8_t floor_used[3][kMaxSectors];
     uint8_t floor_colors[2][kMaxSectors][DOOM_VIEW_HEIGHT][2];
@@ -165,6 +168,7 @@ static bool SupportedRom(const SuperFx *fx)
     static const uint8_t object_light[] = {0xea, 0xea, 0xb9, 0x6a, 0x29, 0x09};
     static const uint8_t floor_plot[] = {0x4e, 0x4c, 0xb4, 0x4e, 0x3c, 0x4c};
     static const uint8_t object_plot[] = {0x4c, 0xec, 0x09};
+    static const uint8_t sky_plot[] = {0x4c, 0x3c, 0x4c, 0xb8, 0x3f, 0xdf};
     return fx && fx->rom && fx->ram && fx->rom_size == 0x200000 &&
         fx->ram_size >= 0x10000 &&
         memcmp(fx->rom + kBsp - 0x8000, bsp, sizeof(bsp)) == 0 &&
@@ -179,7 +183,8 @@ static bool SupportedRom(const SuperFx *fx)
         memcmp(fx->rom + kObjectPlotUnique - 0x8000, object_plot,
                sizeof(object_plot)) == 0 &&
         memcmp(fx->rom + kObjectPlotRepeat - 0x8000, object_plot,
-               sizeof(object_plot)) == 0;
+               sizeof(object_plot)) == 0 &&
+        memcmp(fx->rom + kSkyPlot - 0x8000, sky_plot, sizeof(sky_plot)) == 0;
 }
 
 static void Capture(SuperFx *fx, uint32_t pc, void *context)
@@ -416,6 +421,20 @@ static void MaskObjectPixel(SuperFx *fx, uint32_t pc, void *context)
     if (x + 1 < 72) job->floors[offset + 1] = 0;
 }
 
+static void RecordSkyPixel(SuperFx *fx, uint32_t pc, void *context)
+{
+    (void)pc;
+    RenderJob *job = context;
+    const unsigned x = superfx_reg(fx, 1), y = superfx_reg(fx, 2);
+    if (x + 1 >= 72 || y >= DOOM_VIEW_HEIGHT || job->third >= 3) return;
+    /* R5 is the sky address OR-mask computed by the original episode logic.
+     * Preserve that decision rather than imposing a host episode mapping. */
+    const unsigned sky = superfx_reg(fx, 5) & 0x4000
+        ? kDoomSky2Surface : kDoomSky1Surface;
+    const unsigned offset = y * DOOM_VIEW_WIDTH + job->third * 72 + x;
+    job->floors[offset] = job->floors[offset + 1] = (uint16_t)sky;
+}
+
 static bool RunPrivateTask(RenderJob *job, SuperFx *source, SuperFx *result,
                            unsigned stop_pc)
 {
@@ -434,10 +453,11 @@ static bool RunPrivateTask(RenderJob *job, SuperFx *source, SuperFx *result,
             {kFloorPlot, RecordFloorPixel, job},
             {kObjectPlotUnique, MaskObjectPixel, job},
             {kObjectPlotRepeat, MaskObjectPixel, job},
+            {kSkyPlot, RecordSkyPixel, job},
         };
         completed = superfx_replay_snapshot_with_hooks(source, job->ram, result,
             draw ? draw_hooks : job->yaw ? build_hooks : NULL,
-            draw ? 3 : job->yaw ? 2 : 0);
+            draw ? 4 : job->yaw ? 2 : 0);
     } else {
         completed = superfx_replay_snapshot(source, job->ram, result);
     }
@@ -987,7 +1007,15 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
             const unsigned offset = s.map_y[y][x] * DOOM_VIEW_WIDTH + s.map_x[x];
             unsigned color = s.pictures[picture][offset];
             const unsigned floor = picture ? s.floors[picture][offset] : 0;
-            if (floor) {
+            if (floor == kDoomSky1Surface || floor == kDoomSky2Surface) {
+                /* The source cameras provide the correct world occlusion,
+                 * but perspective warping their screen-space sky stretches
+                 * mountain heights and shifts its phase at the joins. Use
+                 * the common camera for the original panorama's artwork. */
+                color = s.snapshot.rom[DoomSkyRomOffset(s.cached_camera.angle,
+                    (int)x - (int)width / 2 + (int)DOOM_VIEW_WIDTH / 2,
+                    y, floor == kDoomSky2Surface)];
+            } else if (floor) {
                 const unsigned sector = (floor - kSectorData) / kSectorSize;
                 const unsigned ceiling = (floor - kSectorData) % kSectorSize - 8;
                 const unsigned parity = DoomFloorDitherRow(0,

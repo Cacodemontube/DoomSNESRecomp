@@ -191,6 +191,24 @@ int main(int argc, char **argv)
     RecordFloorPixel(&private_fx, kFloorPlot, &floor_job);
     CHECK(!s.floors[1][floor_offset]); /* Invulnerable colour map stays native. */
 
+    /* Sky uses the same occlusion metadata as floors, with its panorama
+     * selected by the authentic private episode logic. Opaque object pairs
+     * must mask sky coverage, while transparent object texels retain it. */
+    private_fx.r[5].data = 0x8000;
+    RecordSkyPixel(&private_fx, kSkyPlot, &floor_job);
+    CHECK(s.floors[1][floor_offset] == kDoomSky1Surface &&
+          s.floors[1][floor_offset + 1] == kDoomSky1Surface);
+    private_fx.colr = 0;
+    MaskObjectPixel(&private_fx, kObjectPlotRepeat, &floor_job);
+    CHECK(s.floors[1][floor_offset + 1] == kDoomSky1Surface);
+    private_fx.colr = 110;
+    MaskObjectPixel(&private_fx, kObjectPlotRepeat, &floor_job);
+    CHECK(!s.floors[1][floor_offset] && !s.floors[1][floor_offset + 1]);
+    private_fx.r[5].data = 0xc000;
+    RecordSkyPixel(&private_fx, kSkyPlot, &floor_job);
+    CHECK(s.floors[1][floor_offset] == kDoomSky2Surface &&
+          s.floors[1][floor_offset + 1] == kDoomSky2Surface);
+
     /* Width changes cannot reuse a cache lacking the side cameras. */
     s.cached = true;
     DoomRendererConfigure(&fx, true, true, 256);
