@@ -36,6 +36,22 @@ bool superfx_replay_snapshot(const SuperFx *source, uint8_t *private_ram,
     return false; /* Exercise the bounded native fallback on guard failure. */
 }
 
+bool superfx_replay_snapshot_with_hooks(const SuperFx *source,
+                                        uint8_t *private_ram, SuperFx *result,
+                                        const SuperFxReplayPcHook *hooks,
+                                        unsigned hook_count)
+{
+    (void)hooks; (void)hook_count;
+    return superfx_replay_snapshot(source, private_ram, result);
+}
+
+uint16_t superfx_reg(const SuperFx *fx, unsigned n) { return fx->r[n].data; }
+void superfx_set_reg(SuperFx *fx, unsigned n, uint16_t value)
+{
+    fx->r[n].data = value;
+    fx->r[n].modified = true;
+}
+
 bool PpuBindOverlaySurface(Ppu *ppu, PpuOverlaySource source,
                            uint8_t *pixels, size_t pitch)
 {
@@ -148,6 +164,32 @@ int main(int argc, char **argv)
     s.field += 4;
     Capture(&fx, kBsp, NULL);
     CHECK(!s.scene_motion && SceneKey(0) == SceneKey(0.5));
+
+    /* Presentation floor identity must survive transparent sprite texels,
+     * then be masked for both pixels of an opaque pair, including the final
+     * pixel drawn in the conditional branch's delay slot. */
+    SuperFx private_fx = fx;
+    private_fx.ram = s.work_ram;
+    RenderJob floor_job = {0};
+    floor_job.third = 1;
+    floor_job.floors = s.floors[1]; floor_job.floor_used = s.floor_used[1];
+    private_fx.r[1].data = 70; private_fx.r[2].data = 100;
+    private_fx.r[9].data = 0xde00; private_fx.r[11].data = 0x9006;
+    WriteWord(private_fx.ram, 0x9004, kSectorData + 8);
+    RecordFloorPixel(&private_fx, kFloorPlot, &floor_job);
+    const unsigned floor_offset = 100 * DOOM_VIEW_WIDTH + 72 + 70;
+    CHECK(s.floors[1][floor_offset] == kSectorData + 8);
+    CHECK(s.floors[1][floor_offset + 1] == kSectorData + 8);
+    CHECK(s.floor_used[1][0] == 1);
+    private_fx.por = private_fx.colr = 0;
+    MaskObjectPixel(&private_fx, kObjectPlotUnique, &floor_job);
+    CHECK(s.floors[1][floor_offset] == kSectorData + 8);
+    private_fx.colr = 110; private_fx.r[12].data = 1;
+    MaskObjectPixel(&private_fx, kObjectPlotUnique, &floor_job);
+    CHECK(!s.floors[1][floor_offset] && !s.floors[1][floor_offset + 1]);
+    private_fx.r[9].data = 0xfe00;
+    RecordFloorPixel(&private_fx, kFloorPlot, &floor_job);
+    CHECK(!s.floors[1][floor_offset]); /* Invulnerable colour map stays native. */
 
     /* Width changes cannot reuse a cache lacking the side cameras. */
     s.cached = true;

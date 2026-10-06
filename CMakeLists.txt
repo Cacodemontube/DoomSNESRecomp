@@ -153,6 +153,12 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME doom_projection COMMAND doom_projection_test)
 
+    add_executable(doom_shading_test tests/doom_shading_test.c)
+    if(NOT MSVC)
+        target_link_libraries(doom_shading_test PRIVATE m)
+    endif()
+    add_test(NAME doom_shading COMMAND doom_shading_test)
+
     add_executable(doom_presentation_test tests/test_doom_presentation.c
         src/doom_video.c src/doom_presentation.c)
     target_include_directories(doom_presentation_test PRIVATE src

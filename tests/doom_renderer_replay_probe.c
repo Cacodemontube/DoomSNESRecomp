@@ -103,16 +103,69 @@ int main(int argc, char **argv)
         camera.z, camera.angle, fraction,
         (unsigned long long)s.stats.replay_instructions,
         (double)(clock() - start) * 1000 / CLOCKS_PER_SEC);
+
+    /* Record native floor identity without changing its lighting. The host
+     * recomputation must reproduce the completed native centre pixel exactly,
+     * including the game's alternating adjacent colour maps. */
+    uint8_t *native_picture = malloc(sizeof(s.pictures[0]));
+    CHECK(native_picture);
+    memcpy(native_picture, s.pictures[0], sizeof(s.pictures[0]));
+    RenderJob native_floor = {0};
+    native_floor.camera = camera; native_floor.fraction = fraction;
+    native_floor.picture = s.pictures[0]; native_floor.ram = s.work_ram;
+    native_floor.floors = s.floors[0]; native_floor.floor_used = s.floor_used[0];
+    ExecuteRenderJob(&native_floor);
+    CHECK(native_floor.success);
+    CHECK(memcmp(native_picture, s.pictures[0], sizeof(s.pictures[0])) == 0);
+    memcpy(s.floor_used[1], s.floor_used[0], sizeof(s.floor_used[0]));
+    memset(s.floor_used[2], 0, sizeof(s.floor_used[2]));
+    s.cached_camera = camera;
+    BuildFloorShading();
+    unsigned floor_count = 0, floor_differences = 0;
+    for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
+        for (unsigned x = 0; x < DOOM_VIEW_WIDTH; x++) {
+            const unsigned offset = y * DOOM_VIEW_WIDTH + x;
+            const unsigned floor = s.floors[0][offset];
+            if (!floor) continue;
+            const unsigned sector = (floor - kSectorData) / kSectorSize;
+            const unsigned ceiling = (floor - kSectorData) % kSectorSize - 8;
+            const unsigned parity = DoomFloorDitherRow(0, (int)x, y);
+            const unsigned expected = s.floor_colors[ceiling][sector][y][parity];
+            floor_count++;
+            if (expected != s.pictures[0][offset]) {
+                if (floor_differences < 4)
+                    fprintf(stderr, "Floor mismatch x=%u y=%u sector=%u ceiling=%u "
+                            "expected=%u native=%u darkness=%u adjust=%u "
+                            "colors=%u/%u\n", x, y, sector, ceiling,
+                            expected, s.pictures[0][offset],
+                            s.work_ram[kSectorData + sector * kSectorSize + 1],
+                            s.work_ram[kLightAdjust],
+                            s.floor_colors[ceiling][sector][y][0],
+                            s.floor_colors[ceiling][sector][y][1]);
+                floor_differences++;
+            }
+        }
+    }
+    printf("Native floor lighting oracle: %u pixels, %u differences\n",
+           floor_count, floor_differences);
+    CHECK(floor_count > 0 && floor_differences == 0);
+    CHECK(memcmp(&original, &s.snapshot, sizeof(original)) == 0);
+    CHECK(memcmp(original_ram, s.ram, ram_size) == 0);
+    CHECK(memcmp(original_previous, s.previous_ram, ram_size) == 0);
+    free(native_picture);
 #ifdef DOOM_REPLAY_PARALLEL
     uint8_t *reference = malloc(sizeof(s.pictures));
-    CHECK(reference);
+    uint16_t *reference_floors = malloc(sizeof(s.floors));
+    CHECK(reference && reference_floors);
     memcpy(reference, s.pictures, sizeof(s.pictures));
+    memcpy(reference_floors, s.floors, sizeof(s.floors));
     const uint64_t parallel_start = SDL_GetPerformanceCounter();
     CHECK(RenderViews(camera, fraction, true));
     CHECK(s.workers[0].thread && s.workers[1].thread);
     CHECK(s.side_ram[0] != s.side_ram[1] && s.side_ram[0] != s.work_ram &&
           s.side_ram[1] != s.work_ram);
     CHECK(memcmp(reference, s.pictures, sizeof(s.pictures)) == 0);
+    CHECK(memcmp(reference_floors, s.floors, sizeof(s.floors)) == 0);
     CHECK(memcmp(&original, &s.snapshot, sizeof(original)) == 0);
     CHECK(memcmp(original_ram, s.ram, ram_size) == 0);
     CHECK(memcmp(original_previous, s.previous_ram, ram_size) == 0);
@@ -126,8 +179,10 @@ int main(int argc, char **argv)
     CHECK(RenderViews(camera, fraction, true));
     CHECK(s.workers[0].thread && s.workers[1].thread);
     CHECK(memcmp(reference, s.pictures, sizeof(s.pictures)) == 0);
+    CHECK(memcmp(reference_floors, s.floors, sizeof(s.floors)) == 0);
     StopWorkers();
     free(reference);
+    free(reference_floors);
     free(s.side_ram[0]); free(s.side_ram[1]);
 #endif
     free(original_ram); free(original_previous);

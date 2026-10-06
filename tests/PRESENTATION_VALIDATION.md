@@ -71,6 +71,29 @@ presentation is expected to change. Inspect full PPMs to verify widened
 geometry, HUD/menu placement, and interpolation; the stock state-dump BMP
 contains only the authentic center 256 columns.
 
+The focused shading regression check uses only the canonical `presentation_route.txt`
+E1M1 capture at field **1620**, aspect **32:9**, output **682x224**, with both FPS
+enhancement and pacing disabled. Capture it with `-Aspect 32:9 -Screenshots
+-ScreenshotFrom 1620 -ScreenshotTo 1620`, then run
+`python tests/check_widescreen_shading.py <capture.ppm> --reference <before.ppm>`.
+The checker uses Python's standard library to read the binary P6 image. It
+requires continuity between flat-floor columns 230-232 and 233-235 at rows
+125-134, allowing at most two RGB levels of variation per channel. The known
+dark-margin regression is RGB16 on the side versus RGB24 in the center and
+fails this check. It also checks the ceiling strip x210-220 at row35 against
+rows33/37 and the flat-floor strip x210-212 at row136 against rows134/138.
+Comparing strip means at matching dither parity allows the normal ceiling
+pattern while rejecting dark scanlines; each channel must stay within two
+RGB levels of both reference rows. The interim LUT regression makes row35
+RGB8 and row136 average RGB2.667 despite bright neighboring rows, so it fails
+these checks. `--reference` additionally requires the entire center-world
+rectangle x233-448/y23-166 (216x144) to remain byte-for-byte unchanged; this
+excludes side-camera border columns that the shading correction should change.
+Exit status is 0 for a pass, 1 for a regression, and 2 for an invalid image.
+This fixture is specific to that route, field and configuration; it is not a
+general image quality test. Keep all captured/reference images in ignored
+build directories and never commit them.
+
 The geometry, projection and host-adapter tests run through CTest. Set
 `-DDOOM_TEST_ROM=<path to your US ROM>` when configuring CMake to include the
 renderer lifecycle/raster test as well. All checks remain active in Release

@@ -14,6 +14,7 @@
  */
 #include "doom_renderer.h"
 #include "doom_projection.h"
+#include "doom_shading.h"
 
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
@@ -51,6 +52,11 @@ enum {
     kOverlayHeight = 240,
     kGsuGo = 1 << 5,
     kMaxHistoryAge = 120,
+    kWallLightScale = 0xcd2c, kObjectLightScale = 0xd425,
+    kFloorPlot = 0xe357, kObjectPlotUnique = 0xe478,
+    kObjectPlotRepeat = 0xe4c3,
+    kMinPixX = 0x0a, kLightAdjust = 0xce, kSlopeYInverse = 0x200,
+    kScaleTableRom = 0x198655, kColorMapsRom = 0x1cde00,
 };
 
 typedef struct Camera {
@@ -63,6 +69,9 @@ typedef struct RenderJob {
     double fraction;
     int yaw;
     uint8_t *picture, *ram;
+    uint16_t *floors;
+    uint8_t *floor_used;
+    unsigned third;
     uint64_t instructions;
     bool success;
     char diagnostic[512];
@@ -88,6 +97,9 @@ typedef struct RenderState {
     bool workers_unavailable;
 #endif
     uint8_t pictures[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
+    uint16_t floors[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
+    uint8_t floor_used[3][kMaxSectors];
+    uint8_t floor_colors[2][kMaxSectors][DOOM_VIEW_HEIGHT][2];
     uint32_t palettes[DOOM_VIEW_HEIGHT][256];
     bool visible_rows[DOOM_VIEW_HEIGHT];
     uint8_t map_picture[kPpuBufWidth], map_x[kPpuBufWidth];
@@ -149,11 +161,25 @@ static bool SupportedRom(const SuperFx *fx)
         0xf1, 0x57, 0xe1, 0xf2, 0xce, 0xe9, 0x05, 0x07, 0x01,
         0xf1, 0x5d, 0xe1, 0xf2, 0xd7, 0xe9, 0xa0, 0x01,
     };
+    static const uint8_t wall_light[] = {0xe3, 0x0a, 0x10, 0xd9, 0x49, 0x9f};
+    static const uint8_t object_light[] = {0xea, 0xea, 0xb9, 0x6a, 0x29, 0x09};
+    static const uint8_t floor_plot[] = {0x4e, 0x4c, 0xb4, 0x4e, 0x3c, 0x4c};
+    static const uint8_t object_plot[] = {0x4c, 0xec, 0x09};
     return fx && fx->rom && fx->ram && fx->rom_size == 0x200000 &&
         fx->ram_size >= 0x10000 &&
         memcmp(fx->rom + kBsp - 0x8000, bsp, sizeof(bsp)) == 0 &&
         memcmp(fx->rom + kBuildC - 0x8000, builds, sizeof(builds)) == 0 &&
-        memcmp(fx->rom + kDrawC - 0x8000, draws, sizeof(draws)) == 0;
+        memcmp(fx->rom + kDrawC - 0x8000, draws, sizeof(draws)) == 0 &&
+        memcmp(fx->rom + kWallLightScale - 0x8000, wall_light,
+               sizeof(wall_light)) == 0 &&
+        memcmp(fx->rom + kObjectLightScale - 0x8000, object_light,
+               sizeof(object_light)) == 0 &&
+        memcmp(fx->rom + kFloorPlot - 0x8000, floor_plot,
+               sizeof(floor_plot)) == 0 &&
+        memcmp(fx->rom + kObjectPlotUnique - 0x8000, object_plot,
+               sizeof(object_plot)) == 0 &&
+        memcmp(fx->rom + kObjectPlotRepeat - 0x8000, object_plot,
+               sizeof(object_plot)) == 0;
 }
 
 static void Capture(SuperFx *fx, uint32_t pc, void *context)
@@ -319,13 +345,102 @@ static void RestartPrivateTask(SuperFx *fx, unsigned address)
     fx->enhancement_mode = kSuperFxEnhancement_PresentationReplay;
 }
 
+static void NormalizeWallLighting(SuperFx *fx, uint32_t pc, void *context)
+{
+    (void)pc;
+    const RenderJob *job = context;
+    const unsigned scale_address = superfx_reg(fx, 9);
+    if (scale_address + 7 >= fx->ram_size) return;
+    /* plwScale/ScaleF are consumed only by lighting at this point. Geometry
+     * has already been traced; the texture stage replaces these with bank
+     * and texture-address fields before drawing (rltracew4.a/rltracew5.a). */
+    const double source_x = fx->ram[scale_address + 6] * 2;
+    const unsigned scale = DoomNormalizeLightingScale(superfx_reg(fx, 3),
+        ReadWord(fx->ram, scale_address + 1),
+        DoomLightingScaleRatio(source_x, job->yaw * (DOOM_SIDE_YAW / 0x2000)));
+    superfx_set_reg(fx, 3, scale >> 15);
+    WriteWord(fx->ram, scale_address + 1, scale & 0x7fff);
+}
+
+static void NormalizeObjectLighting(SuperFx *fx, uint32_t pc, void *context)
+{
+    (void)pc;
+    const RenderJob *job = context;
+    const unsigned object = (uint16_t)(superfx_reg(fx, 11) - 1);
+    if (object + 8 >= fx->ram_size) return;
+    const int depth = (int16_t)ReadWord(fx->ram, object);
+    const int x = (int16_t)ReadWord(fx->ram, object + 6);
+    const double yaw = job->yaw * (DOOM_SIDE_YAW / 0x2000);
+    const double common_depth = depth * cos(yaw) - x * sin(yaw);
+    if (depth <= 0 || common_depth <= 0) return;
+    const unsigned scale = DoomNormalizeLightingScale(superfx_reg(fx, 3),
+        superfx_reg(fx, 2), depth / common_depth);
+    /* Keep the object group's geometry scale in RAM untouched. These two
+     * registers survive only through its colour-map calculation. */
+    superfx_set_reg(fx, 2, scale & 0x7fff);
+    superfx_set_reg(fx, 3, scale >> 15);
+}
+
+static void RecordFloorPixel(SuperFx *fx, uint32_t pc, void *context)
+{
+    (void)pc;
+    RenderJob *job = context;
+    /* Sky uses a different plot loop. Invulnerability uses the special map
+     * at FE00 and must keep its original remapped colours. */
+    if (superfx_reg(fx, 9) == 0xfe00) return;
+    const unsigned pointer = superfx_reg(fx, 11);
+    if (pointer < 2 || pointer > fx->ram_size) return;
+    const uint16_t texture = ReadWord(fx->ram, pointer - 2);
+    if (texture < kSectorData || texture >= kSectorData + kMaxSectors * kSectorSize)
+        return;
+    const unsigned component = (texture - kSectorData) % kSectorSize;
+    if (component != 8 && component != 9) return;
+    const unsigned x = superfx_reg(fx, 1), y = superfx_reg(fx, 2);
+    if (x + 1 >= 72 || y >= DOOM_VIEW_HEIGHT || job->third >= 3) return;
+    const unsigned offset = y * DOOM_VIEW_WIDTH + job->third * 72 + x;
+    job->floors[offset] = job->floors[offset + 1] = texture;
+    job->floor_used[(texture - kSectorData) / kSectorSize] |= 1u << (component - 8);
+}
+
+static void MaskObjectPixel(SuperFx *fx, uint32_t pc, void *context)
+{
+    (void)pc;
+    RenderJob *job = context;
+    if (!fx->colr && !(fx->por & 1)) return;
+    const unsigned x = superfx_reg(fx, 1), y = superfx_reg(fx, 2);
+    if (x >= 72 || y >= DOOM_VIEW_HEIGHT || job->third >= 3) return;
+    const unsigned offset = y * DOOM_VIEW_WIDTH + job->third * 72 + x;
+    job->floors[offset] = 0;
+    /* The second PLOT is the conditional branch's delay-slot instruction,
+     * so it executes even for the final pixel in the object strip. */
+    if (x + 1 < 72) job->floors[offset + 1] = 0;
+}
+
 static bool RunPrivateTask(RenderJob *job, SuperFx *source, SuperFx *result,
                            unsigned stop_pc)
 {
     source->enhancement_mode = kSuperFxEnhancement_PresentationReplay;
     const uint64_t before = source->instruction_count;
     *result = *source; /* Invalid-input rejection can leave result untouched. */
-    const bool completed = superfx_replay_snapshot(source, job->ram, result);
+    bool completed;
+    if (job->yaw || job->floors) {
+        const bool draw = source->r[15].data == kDrawA ||
+            source->r[15].data == kDrawB || source->r[15].data == kDrawC;
+        const SuperFxReplayPcHook build_hooks[] = {
+            {kWallLightScale, NormalizeWallLighting, job},
+            {kObjectLightScale, NormalizeObjectLighting, job},
+        };
+        const SuperFxReplayPcHook draw_hooks[] = {
+            {kFloorPlot, RecordFloorPixel, job},
+            {kObjectPlotUnique, MaskObjectPixel, job},
+            {kObjectPlotRepeat, MaskObjectPixel, job},
+        };
+        completed = superfx_replay_snapshot_with_hooks(source, job->ram, result,
+            draw ? draw_hooks : job->yaw ? build_hooks : NULL,
+            draw ? 3 : job->yaw ? 2 : 0);
+    } else {
+        completed = superfx_replay_snapshot(source, job->ram, result);
+    }
     /* A missing engine callback can jump to the ROM's zero-page STOP. GO
      * clearing alone does not prove that the geometry or picture finished. */
     const bool ok = completed && result->pbr == 0 &&
@@ -500,6 +615,10 @@ static void ExecuteRenderJob(RenderJob *job)
     const double fraction = job->fraction;
     const int yaw = job->yaw;
     SuperFx source = s.snapshot, result;
+    if (job->floors) {
+        memset(job->floors, 0, DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT * sizeof(uint16_t));
+        memset(job->floor_used, 0, kMaxSectors);
+    }
     memcpy(job->ram, s.ram, source.ram_size);
     InterpolateSectors(job->ram, fraction);
     InterpolateObjects(job->ram, fraction);
@@ -523,7 +642,6 @@ static void ExecuteRenderJob(RenderJob *job)
     static const unsigned tasks[] = {kDrawA, kBuildB, kDrawB,
                                      kBuildC, kDrawC};
     static const unsigned stops[] = {0xe528, 0xc835, 0xe549, 0xc835, 0xe570};
-    unsigned third = 0;
     for (unsigned i = 0; i < sizeof(tasks) / sizeof(tasks[0]); i++) {
         source = result;
         /* The replay API requires source RAM and destination RAM to be
@@ -534,7 +652,7 @@ static void ExecuteRenderJob(RenderJob *job)
         RestartPrivateTask(&source, tasks[i]);
         if (!RunPrivateTask(job, &source, &result, stops[i])) return;
         if (tasks[i] == kDrawA || tasks[i] == kDrawB || tasks[i] == kDrawC)
-            DecodeThird(&result, job->picture, third++);
+            DecodeThird(&result, job->picture, job->third++);
     }
     job->success = true;
 }
@@ -558,6 +676,11 @@ static bool RenderCameraInto(Camera camera, double fraction, int yaw,
     RenderJob job = {0};
     job.camera = camera; job.fraction = fraction; job.yaw = yaw;
     job.picture = picture; job.ram = ram;
+    if (yaw) {
+        const unsigned view = picture == s.pictures[1] ? 1 : 2;
+        job.floors = s.floors[view];
+        job.floor_used = s.floor_used[view];
+    }
     ExecuteRenderJob(&job);
     MergeRenderJob(&job);
     return job.success;
@@ -639,6 +762,8 @@ static bool RenderViews(Camera camera, double fraction, bool wide)
             job->camera = camera; job->fraction = fraction;
             job->yaw = i == 0 ? -0x2000 : 0x2000;
             job->picture = s.pictures[i + 1]; job->ram = s.side_ram[i];
+            job->floors = s.floors[i + 1];
+            job->floor_used = s.floor_used[i + 1];
             DoomSignalSemaphore(s.workers[i].request);
         }
         RenderJob center = {0};
@@ -763,6 +888,39 @@ static void BuildProjectionMap(unsigned width, bool wide,
     s.map_wide = wide;
 }
 
+static void BuildFloorShading(void)
+{
+    unsigned count = ReadWord(s.work_ram, kSectorCount);
+    if (count > kMaxSectors) return;
+    for (unsigned sector = 0; sector < count; sector++) {
+        const unsigned used = s.floor_used[1][sector] | s.floor_used[2][sector];
+        const unsigned address = kSectorData + sector * kSectorSize;
+        for (unsigned ceiling = 0; ceiling < 2; ceiling++) {
+            if (!(used & (1u << ceiling))) continue;
+            const int height = (int16_t)ReadWord(s.work_ram,
+                address + (ceiling ? 4 : 2)) - s.cached_camera.z;
+            const unsigned raw_color = s.work_ram[address + 8 + ceiling];
+            for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
+                /* Use the native inverse-slope/scale tables in the common
+                 * camera. Reprojecting pre-shaded source rows instead moves
+                 * the darkness bands and warps the original checker phase. */
+                unsigned distance = (abs(height) * (unsigned)ReadWord(
+                    s.work_ram, kSlopeYInverse + y * 2)) >> 9;
+                if (distance > 7168) distance = 7168;
+                const unsigned scale_address = kScaleTableRom + distance * 3;
+                const unsigned scale = s.snapshot.rom[scale_address] |
+                    ((unsigned)s.snapshot.rom[scale_address + 1] << 8) |
+                    ((unsigned)s.snapshot.rom[scale_address + 2] << 16);
+                const unsigned row = DoomFloorLightRow(s.work_ram[address + 1],
+                    s.work_ram[kLightAdjust], scale);
+                for (unsigned parity = 0; parity < 2; parity++)
+                    s.floor_colors[ceiling][sector][y][parity] = s.snapshot.rom[
+                        kColorMapsRom + (row + parity) * 256 + raw_color];
+            }
+        }
+    }
+}
+
 bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
                       unsigned width, unsigned height, float alpha)
 {
@@ -812,6 +970,7 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
         s.cached_generation = s.generation;
         s.cached = true;
         memcpy(s.presented_ram, s.work_ram, s.snapshot.ram_size);
+        if (wide) BuildFloorShading();
     } else {
         s.stats.cache_hits++;
     }
@@ -824,8 +983,18 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
         if (!s.visible_rows[y]) continue;
         uint32_t *line = (uint32_t *)(dst + (y + kNativeViewY) * pitch);
         for (unsigned x = x0; x < x1; x++) {
-            line[x] = s.palettes[y][s.pictures[s.map_picture[x]][
-                s.map_y[y][x] * DOOM_VIEW_WIDTH + s.map_x[x]]];
+            const unsigned picture = s.map_picture[x];
+            const unsigned offset = s.map_y[y][x] * DOOM_VIEW_WIDTH + s.map_x[x];
+            unsigned color = s.pictures[picture][offset];
+            const unsigned floor = picture ? s.floors[picture][offset] : 0;
+            if (floor) {
+                const unsigned sector = (floor - kSectorData) / kSectorSize;
+                const unsigned ceiling = (floor - kSectorData) % kSectorSize - 8;
+                const unsigned parity = DoomFloorDitherRow(0,
+                    (int)x - (int)width / 2, y);
+                color = s.floor_colors[ceiling][sector][y][parity];
+            }
+            line[x] = s.palettes[y][color];
         }
     }
     /* Overlay capture has resolved OBJ transparency and palette. The HUD and
