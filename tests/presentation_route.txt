@@ -1,0 +1,33 @@
+# Deterministic cold boot, title/menu transitions, E1M1, fire, movement,
+# turning, pause and resume. Use the player's unmodified US ROM.
+wait 400
+dump logo
+press start 1
+wait 150
+dump title-transition
+press start 1
+wait 150
+dump title
+press a 1
+wait 150
+dump menu-transition
+press a 1
+wait 500
+dump gameplay-idle
+press y 60
+dump gameplay-fire
+press up 120
+dump gameplay-forward
+press right 90
+dump gameplay-turn
+press up+left 120
+dump gameplay-moving-turn
+wait 120
+dump gameplay-settle
+press start 24
+wait 60
+dump pause
+press start 24
+wait 120
+dump resumed
+quit

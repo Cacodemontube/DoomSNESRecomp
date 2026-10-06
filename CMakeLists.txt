@@ -42,6 +42,9 @@ add_executable(DoomSNESRecomp
     src/host_contract.c
     src/game_rtl.c
     src/gen_stubs.c
+    src/doom_video.c
+    src/doom_renderer.c
+    src/doom_presentation.c
 )
 
 # ROM identity. rom_identity.txt is the one place the digests live: the build
@@ -134,3 +137,57 @@ target_include_directories(DoomSNESRecomp PRIVATE
 
 # Netplay is not built into this target.
 # No multitap: two seats, one controller per port.
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(doom_video_test tests/test_doom_video.c src/doom_video.c)
+    target_include_directories(doom_video_test PRIVATE src)
+    if(NOT MSVC)
+        target_link_libraries(doom_video_test PRIVATE m)
+    endif()
+    add_test(NAME doom_video COMMAND doom_video_test)
+
+    add_executable(doom_projection_test tests/doom_projection_test.c)
+    if(NOT MSVC)
+        target_link_libraries(doom_projection_test PRIVATE m)
+    endif()
+    add_test(NAME doom_projection COMMAND doom_projection_test)
+
+    add_executable(doom_shading_test tests/doom_shading_test.c)
+    if(NOT MSVC)
+        target_link_libraries(doom_shading_test PRIVATE m)
+    endif()
+    add_test(NAME doom_shading COMMAND doom_shading_test)
+
+    add_executable(doom_presentation_test tests/test_doom_presentation.c
+        src/doom_video.c src/doom_presentation.c)
+    target_include_directories(doom_presentation_test PRIVATE src
+        ${SNESRECOMP_RUNNER_INCLUDE_DIRS} ${SNESRECOMP_ROOT}/runner/src/desktop)
+    snesrecomp_target_sdl(doom_presentation_test)
+    if(NOT MSVC)
+        target_link_libraries(doom_presentation_test PRIVATE m)
+    endif()
+    add_test(NAME doom_presentation COMMAND doom_presentation_test)
+
+    add_executable(doom_renderer_state_test tests/doom_renderer_state_test.c)
+    target_include_directories(doom_renderer_state_test PRIVATE
+        ${SNESRECOMP_ROOT}/runner/src)
+    if(NOT MSVC)
+        target_link_libraries(doom_renderer_state_test PRIVATE m)
+    endif()
+    set(DOOM_TEST_ROM "" CACHE FILEPATH "Optional user-owned Doom USA ROM for renderer tests")
+    if(DOOM_TEST_ROM)
+        add_test(NAME doom_renderer_state COMMAND doom_renderer_state_test "${DOOM_TEST_ROM}")
+    endif()
+
+    add_executable(doom_renderer_replay_probe EXCLUDE_FROM_ALL
+        tests/doom_renderer_replay_probe.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_renderer_replay_probe PRIVATE
+        ${SNESRECOMP_ROOT}/runner/src)
+    target_compile_definitions(doom_renderer_replay_probe PRIVATE DOOM_REPLAY_PARALLEL=1)
+    snesrecomp_target_sdl(doom_renderer_replay_probe)
+    if(NOT MSVC)
+        target_link_libraries(doom_renderer_replay_probe PRIVATE m)
+    endif()
+endif()
