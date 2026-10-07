@@ -31,3 +31,22 @@ See [presentation validation](tests/PRESENTATION_VALIDATION.md) for the
 repeatable gameplay route, guest-state comparisons, and frame captures.
 Set `DOOM_RENDER_STATS=1` to log renderer capture/replay counters while
 investigating a rendering problem.
+
+## Windows frame composition
+
+The pinned shared framework uses cached HLE frame composition by default on
+Windows x64. This optimizes host presentation while preserving the existing
+guest CPU/Super FX, audio and status interfaces. Build the maintained
+correctness-reference compositor separately with
+`cmake -S . -B build-frame-lle -DCMAKE_BUILD_TYPE=Release -DSNESRECOMP_FRAME_IMPL=LLE`,
+then `cmake --build build-frame-lle`. Selection is fixed at build time.
+LLE can reduce performance; it remains available for correctness checks. Other
+platforms keep LLE defaults, and existing CMake cache selections are preserved.
+See [HLE defaults and opt-out](snesrecomp/docs/HLE_DEFAULTS.md).
+
+The reviewed native-view, uncapped Windows route measured 250.122 to 443.316 FPS
+(+77.24%, process CPU -43.12%); it includes boot/menu work and active gameplay.
+The owner accepted the normal-paced adaptive HLE build. These are measured
+build/route results, not universal gains or a quiet-host precision claim;
+foreign compiler activity was observed. Normal play retains normal pacing/audio.
+See the shared framework's [frame model](snesrecomp/docs/FRAME_MODEL_HOSTS.md).
