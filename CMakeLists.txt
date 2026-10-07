@@ -111,7 +111,7 @@ snesrecomp_target_rom_cache(DoomSNESRecomp)
 # audio / input settings). Self-contained: it brings its own ImGui, GL link and
 # staged assets, and defines RECOMP_LAUNCHER so src/main.c compiles its GUI path.
 set(RECOMP_UI_ROOT "${CMAKE_SOURCE_DIR}/recomp-ui" CACHE PATH
-    "Root directory of the recomp-ui launcher repo" FORCE)
+    "Root directory of the recomp-ui launcher repo")
 if(NOT EXISTS "${RECOMP_UI_ROOT}/recomp_ui.cmake")
     message(FATAL_ERROR
         "recomp-ui missing at ${RECOMP_UI_ROOT}.\n"
