@@ -1,7 +1,8 @@
-Doom SNES - PC Port (By Cacodemontube)
+## Doom SNES - PC Port (By Cacodemontube)
 [Created with SNESRecomp]
 
-This project is still not fully functional but you can check it here for research...
+A still in development, native PC port of SNES Doom! 
+With a bunch of quality of life improvements and much more to come!
 
 ## Display enhancements
 
@@ -15,6 +16,8 @@ are disabled by default and can be enabled independently:
   captured game states. Choose **Auto** to follow display refresh, or 60, 90, 120, 144,
   165, 240, or 360 presentations per second. The simulation and game speed
   remain unchanged. This works with widescreen disabled, too.
+- **Internal resolution scaling** Changes the internal resolution of the 3D graphics
+  to one of the many presets provided. Makes the viewing experience much more clear.
 
 Use **Ctrl+L** to reopen the launcher during play. The framework saves the
 selected options in its normal mod state beside the executable. Presentation
