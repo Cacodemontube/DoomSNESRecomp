@@ -1,4 +1,4 @@
-## Doom SNES - PC Port (By Cacodemontube)
+## Doom SNES - PC Recompilation Project (By Cacodemontube)
 [Created with SNESRecomp]
 
 A still in development, native PC port of SNES Doom! 
