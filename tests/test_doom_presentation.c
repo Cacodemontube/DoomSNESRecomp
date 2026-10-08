@@ -144,6 +144,15 @@ bool DoomRendererDraw(Ppu *source, uint8_t *dst, size_t pitch,
     return false;
 }
 
+bool DoomRendererDrawWeapon(Ppu *source, uint8_t *dst, size_t pitch,
+                            unsigned width, unsigned height, float alpha,
+                            bool world_redrawn) {
+    CHECK(source == g_ppu && !world_redrawn);
+    CheckSeed(dst, pitch, width, height);
+    CHECK(alpha >= 0 && alpha <= 1);
+    return true;
+}
+
 static void SetOptions(bool wide, const char *aspect, bool fps, const char *rate) {
     wide_enabled = wide;
     fps_enabled = fps;
@@ -231,14 +240,14 @@ static void fallback_test(unsigned width, bool wide, bool fps, double alpha) {
     DoomPresentationBeforeFrame();
     const unsigned before = draw_calls;
     CHECK(DoomPresentationDraw(dst, pitch, (const uint8_t *)field,
-                               (int)width, DOOM_HEIGHT, alpha) == (wide || fps));
+                               (int)width, DOOM_HEIGHT, alpha) == 1);
     if (wide || fps) {
         CHECK(draw_calls == before + 1);
         CHECK(drawn_alpha == (float)(fps ? alpha : 1));
         CheckSeed(dst, pitch, width, DOOM_HEIGHT);
     } else {
         CHECK(draw_calls == before);
-        for (size_t i = 0; i < bytes; ++i) CHECK(dst[i] == GUARD_VALUE);
+        CheckSeed(dst, pitch, width, DOOM_HEIGHT);
     }
     for (unsigned i = 0; i < GUARD_BYTES; ++i) {
         CHECK(guarded[i] == GUARD_VALUE);

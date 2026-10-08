@@ -1,7 +1,7 @@
 [submodule "snesrecomp"]
 	path = snesrecomp
-	url = https://github.com/RetroPortingToolKit/snesrecomp.git
-	branch = main
+	url = https://github.com/Cacodemontube/snesrecomp.git
+	branch = doom-presentation-fixes
 [submodule "recomp-ui"]
 	path = recomp-ui
 	url = https://github.com/mstan/recomp-ui.git

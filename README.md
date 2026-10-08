@@ -11,8 +11,8 @@ are disabled by default and can be enabled independently:
 - **Adaptive widescreen** renders additional world geometry at 4:3, 16:9,
   21:9, 32:9, or **Fit to window**. Fit follows the window from 4:3 through
   32:9. The original status bar and weapon stay centered.
-- **Interpolated frame rate** interpolates the camera between captured game
-  states. Choose **Auto** to follow display refresh, or 60, 90, 120, 144,
+- **Interpolated frame rate** interpolates the camera and weapon sway between
+  captured game states. Choose **Auto** to follow display refresh, or 60, 90, 120, 144,
   165, 240, or 360 presentations per second. The simulation and game speed
   remain unchanged. This works with widescreen disabled, too.
 
@@ -31,6 +31,14 @@ See [presentation validation](tests/PRESENTATION_VALIDATION.md) for the
 repeatable gameplay route, guest-state comparisons, and frame captures.
 Set `DOOM_RENDER_STATS=1` to log renderer capture/replay counters while
 investigating a rendering problem.
+
+See [lag diagnostics](tests/LAG_DIAGNOSTICS.md) for isolated timing runs,
+reference-emulator comparison, and the developer TCP
+`game presentation_stats` renderer/input query.
+
+The local lag fixes correct beam/APU overshoot accounting and omit unused
+instruction-history writes during private rendering replays. Both preserve
+the player's input configuration; see [fix validation](tests/LAG_FIX_VALIDATION.md).
 
 ## Windows frame composition
 

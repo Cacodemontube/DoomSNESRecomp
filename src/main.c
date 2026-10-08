@@ -28,6 +28,7 @@
 #include "host_main.h"
 #include "game_rtl.h"
 #include "doom_presentation.h"
+#include "doom_debug.h"
 #include "snesrecomp_rom_identity.h"  /* generated from rom_identity.txt */
 
 #ifndef __ANDROID__
@@ -42,6 +43,24 @@
 #ifndef SNES_GAME_VERSION
 #define SNES_GAME_VERSION "dev"
 #endif
+
+static void EndFrame(const uint8_t *field, unsigned number) {
+    DoomPresentationEnd(field, number);
+    DoomDebugRecordFrame(number);
+}
+
+static int DrawFrame(uint8_t *dst, size_t pitch, const uint8_t *field,
+                     int width, int height, double alpha) {
+#if SNESRECOMP_TRACE
+    Uint64 start = SDL_GetPerformanceCounter();
+#endif
+    int result = DoomPresentationDraw(dst, pitch, field, width, height, alpha);
+#if SNESRECOMP_TRACE
+    DoomDebugRecordDraw(1000.0 * (double)(SDL_GetPerformanceCounter() - start) /
+                        (double)SDL_GetPerformanceFrequency());
+#endif
+    return result;
+}
 
 static const SnesDesktopHostGame kGameHost = {
     .display_name        = "Doom",
@@ -63,8 +82,8 @@ static const SnesDesktopHostGame kGameHost = {
     .before_run_frame    = DoomPresentationBeforeFrame,
     .prepare_frame       = DoomPresentationPrepare,
     .begin_sim_frame     = DoomPresentationBegin,
-    .end_sim_frame       = DoomPresentationEnd,
-    .draw_frame          = DoomPresentationDraw,
+    .end_sim_frame       = EndFrame,
+    .draw_frame          = DrawFrame,
     .presentation_hz     = DoomPresentationRate,
     .keep_pacing_debt    = DoomPresentationKeepDebt,
     .window_base_width   = DoomPresentationWindowWidth,
@@ -76,5 +95,6 @@ static const SnesDesktopHostGame kGameHost = {
 #endif
 int main(int argc, char **argv)
 {
+    DoomDebugInit();
     return snesrecomp_desktop_main(&kGameHost, argc, argv);
 }

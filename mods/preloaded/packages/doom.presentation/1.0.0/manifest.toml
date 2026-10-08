@@ -3,7 +3,7 @@ id = "doom.presentation"
 version = "1.0.0"
 name = "Doom Display Enhancements"
 author = "DoomSNESRecomp contributors"
-description = "Adaptive widescreen and interpolated camera presentation."
+description = "Adaptive widescreen and interpolated camera and weapon presentation."
 license = "PolyForm-Noncommercial-1.0.0"
 resolver = "declarative"
 save_compatibility = "shared"
@@ -54,7 +54,7 @@ label = "Fit to window"
 [[feature]]
 id = "presentation-fps"
 name = "Interpolated frame rate"
-description = "Interpolate the camera at the selected presentation rate while keeping the original game speed. Works at 4:3 and widescreen."
+description = "Interpolate the camera and weapon sway at the selected presentation rate while keeping the original game speed. Works at 4:3 and widescreen."
 group = "Presentation"
 default_enabled = false
 presentation_only = true

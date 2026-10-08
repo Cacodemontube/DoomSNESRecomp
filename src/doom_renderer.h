@@ -11,6 +11,11 @@ typedef struct Ppu Ppu;
 typedef struct DoomRendererStats {
     uint64_t captures, camera_passes, cache_hits, failures;
     uint64_t replay_instructions;
+    uint64_t weapon_updates, weapon_interpolated_presentations;
+    int weapon_offset_x, weapon_offset_y;
+    uint64_t weapon_layout_fallbacks;
+    unsigned weapon_tiles;
+    bool weapon_translucent;
     unsigned snapshot_interval;
     bool supported, has_snapshot;
 } DoomRendererStats;
@@ -25,6 +30,9 @@ void DoomRendererObserveLine(const Ppu *ppu, unsigned line, void *context);
 void DoomRendererEndSimFrame(unsigned number);
 bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
                       unsigned width, unsigned height, float alpha);
+bool DoomRendererDrawWeapon(Ppu *ppu, uint8_t *dst, size_t pitch,
+                            unsigned width, unsigned height, float alpha,
+                            bool world_redrawn);
 void DoomRendererReset(void);
 void DoomRendererGetStats(DoomRendererStats *out);
 

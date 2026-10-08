@@ -16,6 +16,8 @@
 #include "doom_projection.h"
 #include "doom_shading.h"
 #include "doom_sky.h"
+#include "doom_weapon.h"
+#include "doom_weapon_sprite.h"
 
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
@@ -110,6 +112,14 @@ typedef struct RenderState {
     unsigned map_width;
     bool map_wide;
     uint32_t weapon[kPpuBufWidth * kOverlayHeight];
+    DoomWeaponMotion weapon_motion;
+    int weapon_anchor_x, weapon_anchor_y;
+    uint64_t weapon_artwork;
+    bool weapon_pose_seen, weapon_translucent;
+    DoomWeaponTile weapon_tiles[96];
+    unsigned weapon_tile_count, weapon_layout_address;
+    uint32_t weapon_palette[DOOM_VIEW_HEIGHT][128];
+    unsigned weapon_palette_mask;
     Ppu *overlay_ppu;
     unsigned configured_width;
     bool widescreen, interpolation, hook_installed, supported;
@@ -206,6 +216,7 @@ static void Capture(SuperFx *fx, uint32_t pc, void *context)
         abs(dx) <= 256 && abs(dy) <= 256 && abs(dz) <= 128 &&
         abs(da) <= 0x4000 &&
         memcmp(s.ram + kLevelIdentity, fx->ram + kLevelIdentity, 4) == 0;
+    if (!continuity) s.weapon_motion = (DoomWeaponMotion){0};
 
     if (continuity) {
         /* Native renders can take unequal numbers of fields. Begin the next
@@ -272,10 +283,15 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
         s.supported = SupportedRom(fx);
         s.hook_installed = false;
         s.has_snapshot = s.has_previous = s.has_presented = s.cached = false;
+        s.weapon_motion = (DoomWeaponMotion){0};
+        s.weapon_tile_count = 0;
     }
     if (s.widescreen != widescreen || s.interpolation != interpolation ||
-        s.configured_width != width)
+        s.configured_width != width) {
         s.cached = false;
+        s.weapon_motion = (DoomWeaponMotion){0};
+        s.weapon_tile_count = 0;
+    }
     s.widescreen = widescreen;
     s.interpolation = interpolation;
     s.configured_width = width;
@@ -306,6 +322,13 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
         s.hook_installed = superfx_set_pc_hook(fx, kBsp, Capture, NULL);
 }
 
+static bool WeaponGameplay(const Ppu *ppu)
+{
+    return ppu && s.fx && s.supported &&
+        (!g_snes || !g_snes->ram || (g_snes->ram[0x2c] & 0x40)) &&
+        ReadWord(s.fx->ram, kAutoMap) == 0;
+}
+
 static bool Gameplay(const Ppu *ppu)
 {
     return ppu && s.fx && s.has_snapshot && s.supported &&
@@ -323,9 +346,16 @@ void DoomRendererPreparePpu(Ppu *ppu)
 {
     if (!ppu) return;
     memset(s.visible_rows, 0, sizeof(s.visible_rows));
+    s.weapon_pose_seen = false;
+    s.weapon_tile_count = 0;
+    s.weapon_palette_mask = 0;
     if (s.overlay_ppu != ppu) s.overlay_ppu = ppu;
     PpuSetOverlayCapture(ppu, kPpuOverlaySource_Obj, 0, 0, 0, 0, 0);
-    if (!Gameplay(ppu)) return;
+    if (!WeaponGameplay(ppu)) {
+        s.weapon_motion = (DoomWeaponMotion){0};
+        s.weapon_tile_count = 0;
+        return;
+    }
     memset(s.weapon, 0, sizeof(s.weapon));
     PpuBindOverlaySurface(ppu, kPpuOverlaySource_Obj, (uint8_t *)s.weapon,
                           kPpuBufWidth * sizeof(uint32_t));
@@ -338,6 +368,17 @@ void DoomRendererEndSimFrame(unsigned number)
 {
     (void)number;
     s.field++;
+    const unsigned previous_weapon_field = s.weapon_motion.changed_field;
+    if (WeaponGameplay(s.overlay_ppu) && s.weapon_pose_seen)
+        DoomWeaponCapture(&s.weapon_motion, s.weapon_anchor_x,
+                          s.weapon_anchor_y, s.weapon_artwork, s.field, s.interval);
+    else {
+        s.weapon_motion = (DoomWeaponMotion){0};
+        s.weapon_tile_count = 0;
+    }
+    if (s.weapon_motion.valid &&
+        s.weapon_motion.changed_field != previous_weapon_field)
+        s.stats.weapon_updates++;
 }
 
 static void RestartPrivateTask(SuperFx *fx, unsigned address)
@@ -455,11 +496,12 @@ static bool RunPrivateTask(RenderJob *job, SuperFx *source, SuperFx *result,
             {kObjectPlotRepeat, MaskObjectPixel, job},
             {kSkyPlot, RecordSkyPixel, job},
         };
-        completed = superfx_replay_snapshot_with_hooks(source, job->ram, result,
+        completed = superfx_replay_snapshot_with_history(source, job->ram, result,
             draw ? draw_hooks : job->yaw ? build_hooks : NULL,
-            draw ? 4 : job->yaw ? 2 : 0);
+            draw ? 4 : job->yaw ? 2 : 0, false);
     } else {
-        completed = superfx_replay_snapshot(source, job->ram, result);
+        completed = superfx_replay_snapshot_with_history(source, job->ram, result,
+                                                         NULL, 0, false);
     }
     /* A missing engine callback can jump to the ROM's zero-page STOP. GO
      * clearing alone does not prove that the geometry or picture finished. */
@@ -837,13 +879,80 @@ static bool WindowCondition(unsigned mode, bool inside)
 void DoomRendererObserveLine(const Ppu *ppu, unsigned line, void *context)
 {
     (void)context;
-    if (!(s.widescreen || s.interpolation) || !s.supported ||
-        !ppu || line <= kNativeViewY ||
+    if (!WeaponGameplay(ppu) || line <= kNativeViewY ||
         line > kNativeViewY + DOOM_VIEW_HEIGHT) return;
     const unsigned row = line - 1 - kNativeViewY;
     s.visible_rows[row] = !PPU_forcedBlank(ppu) && PPU_mode(ppu) == 3 &&
         (ppu->screenEnabled[0] & 1);
     if (!s.visible_rows[row]) return;
+    if (row == 0 && (ppu->oam[64] >> 8) != 0) {
+        /* Slot 32 anchors the game's weapon tile group. Read its actual
+         * scanout position instead of the visible bounding box: Doom hides
+         * lower tiles at the HUD edge, which changes coverage while bobbing.
+         * Track tile layout, not positions. New artwork is always drawn from
+         * the current native overlay, without blending animation frames. */
+        s.weapon_anchor_x = ppu->oam[64] & 255;
+        if (ppu->highOam[8] & 1) s.weapon_anchor_x -= 256;
+        s.weapon_anchor_y = ppu->oam[64] >> 8;
+        /* Doom's invisibility path clears OBJ priority and toggles it back
+         * near expiry. Follow the actual displayed mode, including blinking. */
+        s.weapon_translucent = (ppu->oam[65] & 0x3000) == 0;
+        uint64_t hash = UINT64_C(14695981039346656037);
+        for (unsigned slot = 32; slot < 128; slot++) {
+            const unsigned attr = ppu->oam[slot * 2 + 1];
+            /* Empty slots use bank-zero tile 0, which aliases the changing
+             * world framebuffer. They are not part of the weapon artwork. */
+            if ((attr & 0x1f00) != (ppu->oam[65] & 0x1f00)) continue;
+            hash = (hash ^ (attr & 0xcfff)) * UINT64_C(1099511628211);
+            hash = (hash ^ ((ppu->highOam[slot >> 2] >>
+                             ((slot & 3) * 2)) & 2)) * UINT64_C(1099511628211);
+        }
+        s.weapon_artwork = hash;
+        s.weapon_pose_seen = true;
+        unsigned count = 0;
+        while (count < 96) {
+            unsigned slot = 32 + count;
+            if ((ppu->oam[slot * 2] >> 8) == 224 ||
+                (ppu->oam[slot * 2 + 1] & 0x1ff) !=
+                    ((ppu->oam[65] + count) & 0x1ff) ||
+                ((ppu->highOam[slot >> 2] >> ((slot & 3) * 2)) & 2))
+                break;
+            count++;
+        }
+        const uint8_t *ram = g_snes ? g_snes->ram : NULL;
+        unsigned layout = DoomWeaponFindLayout(ram, 0x20000,
+            s.weapon_layout_address, ppu->oam, ppu->highOam, count,
+            kNativeViewY + DOOM_VIEW_HEIGHT);
+        if (layout != UINT_MAX) {
+            s.weapon_layout_address = layout;
+            const int first_x = (int16_t)ReadWord(ram, layout);
+            const int first_y = (int16_t)ReadWord(ram, layout + 2);
+            for (unsigned i = 0; i < count; i++) {
+                unsigned address = layout + i * 6;
+                unsigned attr = ppu->oam[(32 + i) * 2 + 1];
+                DoomWeaponTile *tile = &s.weapon_tiles[i];
+                tile->palette = (attr >> 9) & 7;
+                s.weapon_palette_mask |= 1u << tile->palette;
+                tile->x = s.weapon_anchor_x + (int16_t)ReadWord(ram, address) - first_x;
+                tile->y = s.weapon_anchor_y + (int16_t)ReadWord(ram, address + 2) - first_y - 1;
+                unsigned base = (attr & 0x100) ? PPU_objTileAdr2(ppu) : PPU_objTileAdr1(ppu);
+                DoomWeaponDecodeTile(tile->pixels, PpuRenderVram(ppu), base, attr);
+            }
+            s.weapon_tile_count = count;
+        } else if (count) {
+            s.stats.weapon_layout_fallbacks++;
+        }
+    }
+    for (unsigned palette = 0; palette < 8; palette++) {
+        if (!(s.weapon_palette_mask & (1u << palette))) continue;
+        for (unsigned i = 0; i < 16; i++) {
+            unsigned color = ppu->cgram[128 + palette * 16 + i];
+            s.weapon_palette[row][palette * 16 + i] = 0xff000000u |
+                (uint32_t)ppu->brightnessMult[color & 31] << 16 |
+                (uint32_t)ppu->brightnessMult[(color >> 5) & 31] << 8 |
+                ppu->brightnessMult[(color >> 10) & 31];
+        }
+    }
 
     /* The guest ends each completed field in forced blank. Observe the
      * beam's display state instead of the post-VBlank register image, so
@@ -1025,31 +1134,66 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
             line[x] = s.palettes[y][color];
         }
     }
-    /* Overlay capture has resolved OBJ transparency and palette. The HUD and
-     * every pixel outside the 3D viewport remain from the native PPU picture. */
-    for (unsigned y = kNativeViewY; y < kNativeViewY + DOOM_VIEW_HEIGHT; y++) {
-        uint32_t *line = (uint32_t *)(dst + y * pitch);
-        for (unsigned x = (width - 256) / 2; x < (width + 256) / 2; x++) {
-            const unsigned native_x = x - (width - 256) / 2;
-            /* The extraction surface's own pitch determines its centre,
-             * independently of the native PPU or final compositor width. */
-            const uint32_t weapon = s.weapon[y * kPpuBufWidth +
-                                             kPpuExtraLeftRight + native_x];
-            if ((weapon & 0xff000000u) && ppu->renderBuffer &&
-                ppu->renderPitch >= (256u + 2u * ppu->extraLeftRight) * 4u) {
-                /* This title puts its weapon on the subscreen, mixed with
-                 * BG1 by the native half-colour operation. The isolated OBJ
-                 * export supplies only coverage; retain its completed PPU
-                 * colour, including that game-authored background blend. */
-                const uint32_t *native = (const uint32_t *)(
-                    ppu->renderBuffer + y * ppu->renderPitch);
-                line[x] = native[native_x + ppu->extraLeftRight];
+    DoomRendererDrawWeapon(ppu, dst, pitch, width, height, alpha, true);
+    return true;
+}
+
+bool DoomRendererDrawWeapon(Ppu *ppu, uint8_t *dst, size_t pitch,
+                            unsigned width, unsigned height, float alpha,
+                            bool world_redrawn)
+{
+    if (!WeaponGameplay(ppu) || !dst || width < 256 || width > kPpuBufWidth ||
+        pitch < width * 4 || height < kNativeViewY + DOOM_VIEW_HEIGHT)
+        return false;
+    int dx, dy;
+    DoomWeaponOffset(&s.weapon_motion, s.field, alpha,
+                     s.interpolation && world_redrawn, &dx, &dy);
+    /* The stock picture already contains the native invisibility blend. */
+    if (!world_redrawn && s.weapon_translucent) return true;
+    s.stats.weapon_offset_x = dx;
+    s.stats.weapon_offset_y = dy;
+    if (dx || dy) s.stats.weapon_interpolated_presentations++;
+    const unsigned center = (width - 256) / 2;
+    if (s.weapon_tile_count) {
+        /* Paint complete tiles first and clip at the final viewport boundary.
+         * Native OAM has already hidden the bottom tiles; shifting its clipped
+         * picture upward would expose holes instead of those missing pixels. */
+        for (unsigned i = s.weapon_tile_count; i-- > 0;) {
+            const DoomWeaponTile *tile = &s.weapon_tiles[i];
+            for (int row = 0; row < 8; row++) {
+                int y = tile->y + row + dy;
+                if (y < kNativeViewY || y >= kNativeViewY + DOOM_VIEW_HEIGHT ||
+                    !s.visible_rows[y - kNativeViewY]) continue;
+                uint32_t *line = (uint32_t *)(dst + y * pitch);
+                for (int col = 0; col < 8; col++) {
+                    int x = tile->x + col + dx;
+                    unsigned color = tile->pixels[row * 8 + col];
+                    if (!color || x < kNativeViewX ||
+                        x >= kNativeViewX + DOOM_VIEW_WIDTH) continue;
+                    line[center + x] = DoomWeaponComposite(
+                        s.weapon_palette[y - kNativeViewY][tile->palette * 16 + color],
+                        line[center + x], s.weapon_translucent);
+                }
+            }
+        }
+    } else {
+        /* A frame whose precomputed layout is unavailable keeps native Y
+         * clipping. Horizontal sway and opacity remain safe in this fallback. */
+        for (unsigned y = kNativeViewY; y < kNativeViewY + DOOM_VIEW_HEIGHT; y++) {
+            if (!s.visible_rows[y - kNativeViewY]) continue;
+            uint32_t *line = (uint32_t *)(dst + y * pitch);
+            for (int x = kNativeViewX; x < kNativeViewX + DOOM_VIEW_WIDTH; x++) {
+                int source_x = x - dx;
+                if (source_x < 0 || source_x >= 256) continue;
+                uint32_t weapon = s.weapon[y * kPpuBufWidth +
+                                             kPpuExtraLeftRight + source_x];
+                if (weapon >> 24) line[center + x] = DoomWeaponComposite(
+                    weapon, line[center + x], s.weapon_translucent);
             }
         }
     }
     return true;
 }
-
 void DoomRendererReset(void)
 {
     /* Cartridge replacement can reuse the same SuperFx allocation address.
@@ -1060,9 +1204,12 @@ void DoomRendererReset(void)
     s.hook_installed = s.supported = false;
     s.has_snapshot = s.has_previous = s.has_presented = s.cached = false;
     s.field = s.captured_field = 0;
+    s.weapon_layout_address = UINT_MAX;
     s.interval = 4;
     s.generation++;
     memset(s.weapon, 0, sizeof(s.weapon));
+    s.weapon_motion = (DoomWeaponMotion){0};
+    s.weapon_tile_count = 0;
     memset(s.visible_rows, 0, sizeof(s.visible_rows));
 }
 
@@ -1070,6 +1217,8 @@ void DoomRendererGetStats(DoomRendererStats *out)
 {
     if (!out) return;
     *out = s.stats;
+    out->weapon_tiles = s.weapon_tile_count;
+    out->weapon_translucent = s.weapon_translucent;
     out->snapshot_interval = s.interval;
     out->supported = s.supported;
     out->has_snapshot = s.has_snapshot;

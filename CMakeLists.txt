@@ -45,6 +45,7 @@ add_executable(DoomSNESRecomp
     src/doom_video.c
     src/doom_renderer.c
     src/doom_presentation.c
+    src/doom_debug.c
 )
 
 # ROM identity. rom_identity.txt is the one place the digests live: the build
@@ -140,6 +141,29 @@ target_include_directories(DoomSNESRecomp PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(host_clock_test ${SNESRECOMP_ROOT}/tests/host/host_clock_test.c
+        ${SNESRECOMP_ROOT}/runner/src/desktop/host_clock.c)
+    target_include_directories(host_clock_test PRIVATE ${SNESRECOMP_ROOT}/runner/src/desktop)
+    if(MSVC)
+        target_compile_options(host_clock_test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(host_clock_test PRIVATE -UNDEBUG)
+        target_link_libraries(host_clock_test PRIVATE m)
+    endif()
+    add_test(NAME host_clock COMMAND host_clock_test)
+    add_executable(doom_weapon_test tests/test_doom_weapon.c)
+    target_include_directories(doom_weapon_test PRIVATE src)
+    if(NOT MSVC)
+        target_link_libraries(doom_weapon_test PRIVATE m)
+    endif()
+    add_test(NAME doom_weapon COMMAND doom_weapon_test)
+    add_executable(apu_frame_clock_test tests/test_apu_frame_clock.c)
+    target_include_directories(apu_frame_clock_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    add_test(NAME apu_frame_clock COMMAND apu_frame_clock_test)
+    add_executable(superfx_replay_history_test tests/test_superfx_replay_history.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(superfx_replay_history_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    add_test(NAME superfx_replay_history COMMAND superfx_replay_history_test)
     add_executable(doom_video_test tests/test_doom_video.c src/doom_video.c)
     target_include_directories(doom_video_test PRIVATE src)
     if(NOT MSVC)

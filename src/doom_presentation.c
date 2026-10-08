@@ -73,17 +73,23 @@ void DoomPresentationEnd(const uint8_t *field, unsigned number) {
         DoomRendererStats stats;
         DoomRendererGetStats(&stats);
         fprintf(stderr, "[doom-render] field=%u supported=%d captured=%llu "
-                "passes=%llu cached=%llu failures=%llu interval=%u\n",
+                "passes=%llu cached=%llu failures=%llu interval=%u "
+                "weapon_updates=%llu weapon_interpolated=%llu weapon_offset=%d,%d weapon_tiles=%u weapon_fallbacks=%llu weapon_translucent=%d\n",
                 number, stats.supported, (unsigned long long)stats.captures,
                 (unsigned long long)stats.camera_passes,
                 (unsigned long long)stats.cache_hits,
-                (unsigned long long)stats.failures, stats.snapshot_interval);
+                (unsigned long long)stats.failures, stats.snapshot_interval,
+                (unsigned long long)stats.weapon_updates,
+                (unsigned long long)stats.weapon_interpolated_presentations,
+                stats.weapon_offset_x, stats.weapon_offset_y,
+                stats.weapon_tiles, (unsigned long long)stats.weapon_layout_fallbacks,
+                stats.weapon_translucent);
     }
 }
 
 int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
                          int width, int height, double alpha) {
-    if (!settings.widescreen && !settings.fps_enabled) return 0;
+    /* Weapon opacity is corrected even with display enhancements disabled. */
     /* The stock field is always 256 wide. The generic copy fallback uses
      * output width as source stride, which is inappropriate for a custom
      * compositor. Menus and unsupported scenes stay centered and unstretched. */
@@ -96,8 +102,10 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
         memcpy(row + (size_t)extra * 4, field + (size_t)y * DOOM_STOCK_WIDTH * 4,
                DOOM_STOCK_WIDTH * 4);
     }
-    DoomRendererDraw(g_ppu, dst, pitch, (unsigned)width, (unsigned)height,
-                     (float)DoomPresentationAlpha(&settings, alpha));
+    float weight = (float)DoomPresentationAlpha(&settings, alpha);
+    if ((!settings.widescreen && !settings.fps_enabled) ||
+        !DoomRendererDraw(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight))
+        DoomRendererDrawWeapon(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight, false);
     return 1;
 }
 

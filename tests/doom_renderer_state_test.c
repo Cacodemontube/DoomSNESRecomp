@@ -46,6 +46,14 @@ bool superfx_replay_snapshot_with_hooks(const SuperFx *source,
 }
 
 uint16_t superfx_reg(const SuperFx *fx, unsigned n) { return fx->r[n].data; }
+bool superfx_replay_snapshot_with_history(const SuperFx *source,
+                                          uint8_t *private_ram, SuperFx *result,
+                                          const SuperFxReplayPcHook *hooks,
+                                          unsigned hook_count, bool history)
+{
+    (void)history;
+    return superfx_replay_snapshot_with_hooks(source, private_ram, result, hooks, hook_count);
+}
 void superfx_set_reg(SuperFx *fx, unsigned n, uint16_t value)
 {
     fx->r[n].data = value;
@@ -264,6 +272,68 @@ int main(int argc, char **argv)
     CHECK(DoomRendererDraw(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0));
     CHECK(s.has_presented && replay_attempts == 1 && s.stats.cache_hits == 1);
 
+    /* Translate the resolved weapon colour and its mask together, leaving
+     * the original location covered by the newly rendered world. */
+    ppu->renderPitch = 256 * sizeof(uint32_t);
+    ppu->renderBuffer = calloc(224, ppu->renderPitch);
+    CHECK(ppu->renderBuffer);
+    const unsigned gun_y = kNativeViewY;
+    const unsigned gun_x = 106;
+    s.weapon[gun_y * kPpuBufWidth + kPpuExtraLeftRight + gun_x] = 0xff123456;
+    ((uint32_t *)(ppu->renderBuffer + gun_y * ppu->renderPitch))[gun_x] = 0xffabcdef;
+    DoomWeaponCapture(&s.weapon_motion, 100, 100, 123, s.field, 6);
+    int dx, dy;
+    DoomWeaponOffset(&s.weapon_motion, s.field, 0, true, &dx, &dy);
+    DoomWeaponCapture(&s.weapon_motion, 106, 100, 123, s.field + 6, 6);
+    s.field += 6;
+    CHECK(DoomRendererDraw(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0));
+    CHECK(output[gun_y * 342 + 43 + 100] == 0xff123456);
+    CHECK(output[gun_y * 342 + 43 + gun_x] != 0xff123456);
+    CHECK(s.stats.weapon_offset_x == -6);
+    /* A complete hidden bottom tile remains visible when translated upward.
+     * It clips at the fixed HUD boundary, rather than moving that boundary. */
+    s.weapon_tile_count = 1;
+    s.weapon_tiles[0].x = 100;
+    s.weapon_tiles[0].y = kNativeViewY + DOOM_VIEW_HEIGHT;
+    memset(s.weapon_tiles[0].pixels, 1, 64);
+    for (unsigned row = 0; row < DOOM_VIEW_HEIGHT; row++) {
+        s.visible_rows[row] = true;
+        s.weapon_palette[row][1] = 0xff204080;
+    }
+    DoomWeaponCapture(&s.weapon_motion, 100, 94, 456, s.field, 6);
+    DoomWeaponOffset(&s.weapon_motion, s.field, 0, true, &dx, &dy);
+    DoomWeaponCapture(&s.weapon_motion, 100, 100, 456, s.field + 6, 6);
+    s.field += 6;
+    const unsigned edge = kNativeViewY + DOOM_VIEW_HEIGHT;
+    output[edge * 342 + 43 + 100] = 0xffaabbcc; /* HUD sentinel. */
+    CHECK(DoomRendererDrawWeapon(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0, true));
+    CHECK(output[(edge - 6) * 342 + 43 + 100] == 0xff204080);
+    CHECK(output[edge * 342 + 43 + 100] == 0xffaabbcc);
+    /* Invisibility affects colour only, and disabling interpolation uses the
+     * native position immediately. */
+    s.weapon_tiles[0].y = edge - 10;
+    s.interpolation = false;
+    s.weapon_translucent = true;
+    output[(edge - 10) * 342 + 43 + 100] = 0xff80a0c0;
+    CHECK(DoomRendererDrawWeapon(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0, true));
+    CHECK(output[(edge - 10) * 342 + 43 + 100] == 0xff5070a0);
+    CHECK(s.stats.weapon_offset_x == 0 && s.stats.weapon_offset_y == 0);
+    s.weapon_translucent = false;
+    CHECK(DoomRendererDrawWeapon(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0, true));
+    CHECK(output[(edge - 10) * 342 + 43 + 100] == 0xff204080);
+    /* A muzzle flash is a separate image and can use another OBJ palette. */
+    s.weapon_tile_count = 2;
+    s.weapon_tiles[1] = s.weapon_tiles[0];
+    s.weapon_tiles[1].x = 116;
+    s.weapon_tiles[1].palette = 2;
+    for (unsigned row = 0; row < DOOM_VIEW_HEIGHT; row++)
+        s.weapon_palette[row][2 * 16 + 1] = 0xffffff00;
+    CHECK(DoomRendererDrawWeapon(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0, true));
+    CHECK(output[(edge - 10) * 342 + 43 + 116] == 0xffffff00);
+    CHECK(output[(edge - 10) * 342 + 43 + 100] == 0xff204080);
+    free(ppu->renderBuffer);
+    ppu->renderBuffer = NULL;
+
     /* Core/allocator reuse after reset loses its hooks even if every pointer
      * has the same numeric address. Reconfigure must still rearm capture. */
     DoomRendererReset();
@@ -273,8 +343,9 @@ int main(int argc, char **argv)
     DoomRendererConfigure(&fx, false, false, 256);
     CHECK(!s.hook_installed && !s.has_snapshot);
     s.palettes[0][5] = 0x12345678;
+    ppu->inidisp = 0x80;
     DoomRendererObserveLine(ppu, kNativeViewY + 1, NULL);
-    CHECK(s.palettes[0][5] == 0x12345678); /* Disabled observer does no work. */
+    CHECK(s.palettes[0][5] == 0x12345678); /* Blank scanout does no palette work. */
     DoomRendererConfigure(NULL, false, false, 256);
     free(output); free(ppu); free(fx.ram); free(fx.rom);
     puts("Doom renderer state tests passed");
