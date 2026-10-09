@@ -15,6 +15,11 @@ typedef struct DoomRendererStats {
     int weapon_offset_x, weapon_offset_y;
     uint64_t weapon_layout_fallbacks;
     unsigned weapon_tiles, resolution_scale, resolution_segments;
+    unsigned recovered_edges;
+    bool menu_active;
+    unsigned automap_lines;
+    uint64_t automap_draws, automap_interpolated_presentations;
+    bool automap_active, automap_transparent;
     bool weapon_translucent;
     unsigned snapshot_interval;
     bool supported, has_snapshot;
@@ -27,8 +32,13 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
 void DoomRendererPreparePpu(Ppu *ppu);
 void DoomRendererSetResolution(unsigned scale);
 void DoomRendererSetLook(bool enabled, double horizon_offset);
+void DoomRendererSetTransparentMap(bool enabled);
+bool DoomRendererAutomapOverlay(void);
+bool DoomRendererDrawAutomap(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,float alpha,bool world);
 bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
 void DoomRendererDrawMessages(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
+void DoomRendererDrawMenu(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
+void DoomRendererRememberHud(const uint8_t *field);
 /* Called by the beam driver after each authentic visible scanline. */
 void DoomRendererObserveLine(const Ppu *ppu, unsigned line, void *context);
 void DoomRendererEndSimFrame(unsigned number);

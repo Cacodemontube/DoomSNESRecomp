@@ -20,7 +20,11 @@ bool superfx_set_pc_hook(SuperFx *fx, uint32_t pc, SuperFxPcHook *hook,
                         void *context)
 {
     (void)context;
-    CHECK(pc == kBsp);
+    if(pc!=kBsp) {
+        bool found=false;
+        for(unsigned i=0;i<sizeof(map_hooks)/sizeof(*map_hooks);i++)found|=pc==map_hooks[i].pc;
+        CHECK(found);return true;
+    }
     fx->pc_hook_count = hook != NULL;
     registrations += hook != NULL;
     return true;
@@ -60,12 +64,16 @@ void superfx_set_reg(SuperFx *fx, unsigned n, uint16_t value)
     fx->r[n].modified = true;
 }
 
+void PpuClearOverlayCaptures(Ppu *ppu) {
+    memset(ppu->overlayCaptures,0,sizeof(ppu->overlayCaptures));
+}
+
 bool PpuBindOverlaySurface(Ppu *ppu, PpuOverlaySource source,
                            uint8_t *pixels, size_t pitch)
 {
     (void)ppu;
-    CHECK(source == kPpuOverlaySource_Obj && pixels != NULL);
-    CHECK(pitch == kPpuBufWidth * sizeof(uint32_t));
+    CHECK((source == kPpuOverlaySource_Obj || source == kPpuOverlaySource_Bg2) && pixels != NULL);
+    CHECK(pitch == kPpuBufWidth * sizeof(uint32_t) || pitch == 256*4);
     overlay_bindings++;
     return true;
 }
@@ -74,14 +82,14 @@ bool PpuSetOverlayCapture(Ppu *ppu, PpuOverlaySource source,
                           int x, int y, int width, int height, uint8_t flags)
 {
     (void)ppu; (void)x; (void)y; (void)width; (void)height; (void)flags;
-    CHECK(source == kPpuOverlaySource_Obj);
+    CHECK(source == kPpuOverlaySource_Obj || source == kPpuOverlaySource_Bg2);
     return true;
 }
 
 bool PpuSetOverlayOamRange(Ppu *ppu, uint8_t first, uint8_t count)
 {
     (void)ppu;
-    CHECK(first == 32 && count == 96);
+    CHECK((first == 32 && count == 96) || (first == 0 && count == 128));
     return true;
 }
 
@@ -418,6 +426,65 @@ int main(int argc, char **argv)
     ppu->inidisp = 0x80;
     DoomRendererObserveLine(ppu, kNativeViewY + 1, NULL);
     CHECK(s.palettes[0][5] == 0x12345678); /* Blank scanout does no palette work. */
+    /* Automap scanout needs its own visibility/palette observation even
+     * though native weapon capture is disabled in this mode. Native line
+     * collection and a transparent-world snapshot must leave RAM intact. */
+    DoomRendererSetResolution(4);DoomRendererSetTransparentMap(true);
+    WriteWord(fx.ram,kAutoMap,1);WriteWord(fx.ram,kMapScale,0x2000);
+    DoomRendererConfigure(&fx,false,true,256);CHECK(s.map_hooks);
+    uint8_t *authentic=malloc(fx.ram_size);CHECK(authentic);
+    memcpy(authentic,fx.ram,fx.ram_size);
+    CaptureMapBegin(&fx,kMapA,NULL);
+    fx.r[2].data=10;fx.r[3].data=20;fx.r[7].data=30;fx.r[8].data=40;fx.colr=0xe1;
+    CaptureMapLine(&fx,kMapLine,NULL);
+    CaptureMapStrip(&fx,kMapB,NULL);CaptureMapLine(&fx,kMapLine,NULL);
+    CHECK(s.map_pending.count==1);
+    CaptureMapEnd(&fx,kMiscC,NULL);
+    CHECK(s.map_current.valid && s.map_current.count==1 && s.map_current.pose.zoom==0.25);
+    CHECK(s.map_current.lines[0].x1==10 && s.map_current.lines[0].y2==40);
+    CHECK(s.snapshot_map && s.has_snapshot && DoomRendererAutomapOverlay());
+    CHECK(!memcmp(authentic,fx.ram,fx.ram_size));free(authentic);
+    ppu->inidisp=15;ppu->bgmode=3;ppu->screenEnabled[0]=1;
+    DoomRendererObserveLine(ppu,kNativeViewY+1,NULL);
+    CHECK(s.visible_rows[0] && (s.palettes[0][0xe1]>>24)==255);
+    WriteWord(fx.ram,kAutoMap,0);DoomRendererPreparePpu(ppu);
+    CHECK(!s.map_current.valid && !DoomRendererAutomapOverlay());
+    /* Native menus retain their level snapshot beyond the normal history
+     * timeout, while unrelated title/transition phases still reject it. */
+    uint32_t *native_field=malloc(256*224*4);CHECK(native_field);
+    s.scene_brightness=15;
+    for(unsigned i=0;i<256*224;i++)native_field[i]=0xff556677;
+    DoomRendererRememberHud((uint8_t *)native_field);CHECK(s.menu_hud_valid);
+    memset(native_field,0,256*224*4);
+    native_field[180*256+128]=0xffabcdef;
+    DoomRendererRememberHud((uint8_t *)native_field);CHECK(s.menu_hud[20]==0xff556677);
+    free(native_field);
+    Snes machine={0};uint8_t menu_ram[64]={0};machine.ram=menu_ram;g_snes=&machine;
+    WriteWord(menu_ram,0x2d,8);WriteWord(menu_ram,0x2f,8);
+    s.field=s.captured_field+240;
+    CHECK(NativeMenu() && Gameplay(ppu));
+    s.weapon_tile_count=1;s.weapon_palette_mask=1;
+    s.weapon_tiles[0]=(DoomWeaponTile){.x=25,.y=kNativeViewY,.palette=0};
+    s.weapon_tiles[0].pixels[0]=1;
+    s.menu_weapon_count=1;s.menu_weapon_palette_mask=1;
+    s.menu_weapon_tiles[0]=s.weapon_tiles[0];
+    s.weapon_tile_count=0;s.weapon_palette_mask=0; /* Menu setup transition. */
+    DoomRendererPreparePpu(ppu);
+    CHECK(s.weapon_tile_count==1 && s.weapon_palette_mask==1);
+    DoomRendererEndSimFrame(0);CHECK(s.weapon_tile_count==1);
+    DoomRendererObserveLine(ppu,kNativeViewY+1,NULL);CHECK(s.visible_rows[0]);
+    s.weapon_palette[0][1]=0xff654321;
+    CHECK(DoomRendererDrawWeapon(ppu,(uint8_t *)output,342*4,342,224,0,true));
+    CHECK(output[kNativeViewY*342+43+25]==0xff654321);
+    s.menu_text[kNativeViewY*256+10]=0xff123456;
+    s.menu_objects[kNativeViewY*256+11]=0xffabcdef;
+    DoomRendererDrawMenu((uint8_t *)output,342*4,342,1);
+    CHECK(output[kNativeViewY*342+43+10]==0xff123456);
+    CHECK(output[kNativeViewY*342+43+11]==0xffabcdef);
+    CHECK(output[180*342+43+20]==0xff556677);
+    s.scene_brightness=0;DoomRendererDrawMenu((uint8_t *)output,342*4,342,1);
+    CHECK(output[180*342+43+20]==0xff000000);
+    WriteWord(menu_ram,0x2d,0);CHECK(!NativeMenu() && !Gameplay(ppu));g_snes=NULL;
     DoomRendererConfigure(NULL, false, false, 256);
     free(output); free(ppu); free(fx.ram); free(fx.rom);
     puts("Doom renderer state tests passed");

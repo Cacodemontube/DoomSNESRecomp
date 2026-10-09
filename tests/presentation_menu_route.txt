@@ -1,0 +1,19 @@
+# Cold boot, walk and turn, hold the native menu beyond snapshot expiry,
+# then resume. Suitable for a release screenshot at field 1900.
+wait 400
+press start 1
+wait 150
+press start 1
+wait 150
+press a 1
+wait 150
+press a 1
+wait 500
+press up 120
+press right 24
+wait 120
+press start 24
+wait 300
+press start 24
+wait 120
+quit

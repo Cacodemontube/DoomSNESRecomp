@@ -14,6 +14,7 @@
 static DoomVideoSettings settings;
 static DoomViewport viewport = {256, 0, 4.0 / 3.0};
 static uint8_t resolution_base[DOOM_MAX_WIDTH * DOOM_HEIGHT * 4];
+static bool transparent_map;
 
 /* Read the selection before window creation, too: the host probes the rate
  * before plugin activation to select its pacing and VSync policy. The normal
@@ -21,6 +22,7 @@ static uint8_t resolution_base[DOOM_MAX_WIDTH * DOOM_HEIGHT * 4];
 static void ReadSettings(void) {
     char value[32];
     DoomVideoDefaults(&settings);
+    transparent_map=snes_mod_runtime_feature_enabled_c("doom.presentation","transparent-automap")!=0;
     settings.widescreen = snes_mod_runtime_feature_enabled_c(
         "doom.presentation", "widescreen") != 0;
     settings.resolution_enabled = snes_mod_runtime_feature_enabled_c(
@@ -43,6 +45,7 @@ SNES_MOD_CONSTRUCTOR(RegisterDoomPresentation) {
     snes_mod_register_presentation_plugin("doom.presentation.widescreen", ReadSettings);
     snes_mod_register_presentation_plugin("doom.presentation.fps", ReadSettings);
     snes_mod_register_presentation_plugin("doom.presentation.resolution", ReadSettings);
+    snes_mod_register_presentation_plugin("doom.presentation.automap", ReadSettings);
     snes_mod_register_reset_callback(ReadSettings);
 }
 
@@ -52,6 +55,7 @@ void DoomPresentationReset(void) {
 
 static void ConfigureRenderer(void) {
     DoomRendererSetLook(DoomInputLookEnabled(), DoomInputPitch());
+    DoomRendererSetTransparentMap(transparent_map);
     DoomRendererSetResolution(settings.resolution_enabled ? settings.resolution_scale : 1);
     if (g_snes && g_snes->cart)
         DoomRendererConfigure(g_snes->cart->superfx, settings.widescreen,
@@ -122,8 +126,9 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
                DOOM_STOCK_WIDTH * 4);
     }
     float weight = (float)DoomPresentationAlpha(&settings, alpha);
+    DoomRendererRememberHud(field);
     bool tilted = DoomInputLookEnabled() && DoomInputPitch() != 0;
-    bool world = (settings.widescreen || settings.fps_enabled || settings.resolution_enabled || tilted) &&
+    bool world = (settings.widescreen || settings.fps_enabled || settings.resolution_enabled || tilted || DoomRendererAutomapOverlay()) &&
         DoomRendererDraw(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight);
     if (scale == 1) {
         if (world && tilted && !settings.widescreen) DoomRendererDrawResolution(dst, pitch, width, 1);
@@ -138,6 +143,8 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
         DoomRendererDrawWeapon(g_ppu, output, output_pitch, width * scale, height * scale, weight, world);
     }
     if(world)DoomRendererDrawMessages(output,output_pitch,width,scale);
+    DoomRendererDrawAutomap(output,output_pitch,width,scale,weight,world);
+    if(world)DoomRendererDrawMenu(output,output_pitch,width,scale);
     return 1;
 }
 
@@ -150,7 +157,7 @@ int DoomPresentationKeepDebt(void) {
     /* A costly camera pass may miss a deadline. Keep simulation on its
      * original clock and catch up through cached presents, as F-Zero does,
      * instead of permanently turning each missed deadline into slow motion. */
-    return settings.widescreen || settings.fps_enabled || settings.resolution_enabled || DoomInputLookEnabled();
+    return settings.widescreen || settings.fps_enabled || settings.resolution_enabled || transparent_map || DoomInputLookEnabled();
 }
 
 int DoomPresentationWindowWidth(int width) {

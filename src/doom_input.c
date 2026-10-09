@@ -310,6 +310,10 @@ uint16_t DoomInputAuxiliary(unsigned player,uint16_t pad) {
 }
 int DoomInputEvent(const void *opaque) {
     const SDL_Event *event = opaque;
+    /* Cheats see this event first, so the P in IDCLIP still works. Doom's
+     * Start button owns pausing; never pass P to the host pause shortcut. */
+    if (event && (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
+        SNESRECOMP_SDL_EVENT_KEY(*event) == SDLK_p) return 1;
     if (!enabled) return 0;
 #if SNESRECOMP_SDL3
     int lost_focus = event->type == SDL_EVENT_WINDOW_FOCUS_LOST;

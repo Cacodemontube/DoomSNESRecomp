@@ -11,7 +11,7 @@
 
 /* Retail USA layout, checked before use. These are private BUILD outputs,
  * not framebuffer pixels. Source: DOOM-FX rle.i and rltracew4/5.a. */
-enum { DOOM_RES_NATIVE_SEGMENTS = 168, DOOM_RES_SEGMENTS = 3*168,
+enum { DOOM_RES_NATIVE_SEGMENTS = 168, DOOM_RES_SEGMENTS = 2048,
        DOOM_RES_SEGMENT_SIZE = 62, DOOM_RES_RAY_BINS = 128 };
 enum { DOOM_RES_SCREEN_PLANE = 4 };
 /* Native RL->SCN tables use 128/depth vertically; the horizontal focal
@@ -41,7 +41,7 @@ typedef struct DoomResolutionSegment {
     uint16_t flags, near_sector, far_sector, texture[2];
     uint8_t texture_h[2], texture_w[2], offset_x, offset_y;
     int16_t angle, perpendicular, texture_offset;
-    uint16_t vertex[2];
+    uint16_t vertex[2], face;
     int texture_origin[2];
     int floor_height, ceiling_height, upper_bottom, lower_top;
     bool world_uv;
@@ -132,6 +132,7 @@ static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
         DoomResolutionSegment *seg = &scene->segments[count++];
         *seg = (DoomResolutionSegment){0};
         seg->vertex[0]=(uint16_t)v1;seg->vertex[1]=(uint16_t)v2;
+        seg->face=(uint16_t)DoomResolutionWord(p+8);
         seg->x1 = DoomResolutionSigned(ram + v1 + 2);
         /* RLSEGS2 caches Y relative to RLScreenPlane, not the eye. RLSEGS3
          * adds the plane distance back before projecting. Restore it here
@@ -174,6 +175,116 @@ static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
     }
     scene->count = count;
     return count != 0;
+}
+/* Recover front-facing map edges omitted by the native two-pixel occlusion
+ * test. The guarded retail WALLS table resolves every texture without
+ * depending on which patches happen to be visible in this frame. All
+ * heights and alternate texture translations use current private RAM. */
+static inline unsigned DoomResolutionRecoverEdges(DoomResolutionScene *scene,
+    const DoomResolutionScene *views,const uint8_t *ram,const uint8_t *rom,size_t size) {
+    struct { uint16_t address; uint8_t h,w; bool valid; } textures[2][256]={0};
+    unsigned bank=ram[0x7e],num=DoomResolutionWord(ram+0x92);
+    if(!num || num>2048 || size<0x200000)return 0;
+    /* RLBuildVSegList3: WALLS bank $5b, table $0000, image headers $007e;
+     * RLAddWallTexture: alternate ID table in cartridge RAM $4c36. */
+    const uint8_t table_code[]={0xa3,0,0xa4,0x5b};
+    const uint8_t alternate_code[]={0xf1,0x36,0x4c};
+    if(!memcmp(rom+0x4403,table_code,sizeof(table_code)) &&
+       !memcmp(rom+0x4467,alternate_code,sizeof(alternate_code)) &&
+       rom[0x4472]==0xa1 && rom[0x4473]==0x7e) {
+        for(unsigned alt=0;alt<2;alt++)for(unsigned id=0;id<0x7c;id+=2) {
+            unsigned translated=alt ? ram[0x4c36+id] : id;
+            if(translated>=0x7c || (translated&1))continue;
+            unsigned patch=0x7e + DoomResolutionWord(rom+0x1b0000+translated);
+            if(patch+2>=0x10000)continue;
+            unsigned h=rom[0x1b0000+patch],w=rom[0x1b0001+patch];
+            unsigned height=h ? h : 256;
+            if((height&(height-1)) || ((w+1)&w))continue;
+            textures[alt][id].address=patch;textures[alt][id].h=h;
+            textures[alt][id].w=w;textures[alt][id].valid=true;
+        }
+    }
+    for(unsigned view=0;view<3;view++)for(unsigned i=0;i<views[view].count;i++) {
+        const DoomResolutionSegment *s=&views[view].segments[i];
+        unsigned face=DoomResolutionRomAddress(bank,s->face);
+        if(face+4>size)continue;
+        for(unsigned c=0;c<2;c++) {
+            if(!(s->flags&(c ? 4 : (1|2))))continue;
+            unsigned id=rom[face+((s->flags&1) ? 1 : 2+c)],alt=(s->flags&0x1000)!=0;
+            if(textures[alt][id].valid)continue;
+            textures[alt][id].address=s->texture[c];
+            textures[alt][id].h=s->texture_h[c]&0xfe;
+            textures[alt][id].w=s->texture_w[c];
+            textures[alt][id].valid=true;
+        }
+    }
+    unsigned recovered=0;
+    for(unsigned i=0;i<num && scene->count<DOOM_RES_SEGMENTS;i++) {
+        unsigned address=DoomResolutionRomAddress(bank,
+            (DoomResolutionWord(ram+0x88)+(i+1)*11)&0xffff);
+        if(address+11>size)continue;
+        const uint8_t *raw=rom+address;
+        DoomResolutionSegment edge={0};
+        edge.vertex[0]=DoomResolutionWord(raw);edge.vertex[1]=DoomResolutionWord(raw+2);
+        if(!DoomResolutionMapVertex(ram,edge.vertex[0],rom,size,&edge.x1,&edge.z1) ||
+           !DoomResolutionMapVertex(ram,edge.vertex[1],rom,size,&edge.x2,&edge.z2))continue;
+        if((edge.z1<=0 && edge.z2<=0) || edge.z1*edge.x2-edge.x1*edge.z2<=1e-9)continue;
+        if(edge.z1>0 && edge.z2>0 &&
+           (fmin(edge.x1/edge.z1,edge.x2/edge.z2)>scene->ray_limit ||
+            fmax(edge.x1/edge.z1,edge.x2/edge.z2)<-scene->ray_limit))continue;
+        edge.face=(DoomResolutionWord(ram+0x94)+DoomResolutionWord(raw+7))&0xffff;
+        unsigned fa=DoomResolutionRomAddress(bank,edge.face);
+        if(fa+4>size || rom[fa]>=205)continue;
+        edge.near_sector=rom[fa];edge.far_sector=UINT16_MAX;
+        bool duplicate=false;
+        for(unsigned j=0;j<scene->count;j++)if(scene->segments[j].vertex[0]==edge.vertex[0] &&
+            scene->segments[j].vertex[1]==edge.vertex[1] && scene->segments[j].near_sector==edge.near_sector) {
+            duplicate=true;break;
+        }
+        if(duplicate)continue;
+        const uint8_t *near=scene->sectors+edge.near_sector*14;
+        edge.floor_height=DoomResolutionSigned(near+2);
+        edge.ceiling_height=DoomResolutionSigned(near+4);
+        unsigned flags=raw[4],alt=(flags&16)!=0;
+        if(flags&1) {
+            edge.flags=0x8201;
+            if((flags&2) || edge.ceiling_height>=scene->view_z)edge.flags|=0x20;
+            if(edge.floor_height<scene->view_z)edge.flags|=0x40;
+        } else {
+            if(rom[fa+1]>=205)continue;
+            edge.far_sector=rom[fa+1];
+            const uint8_t *far=scene->sectors+edge.far_sector*14;
+            int floor=DoomResolutionSigned(far+2),ceil=DoomResolutionSigned(far+4);
+            if(!(flags&2)) {
+                if(edge.ceiling_height>ceil) {
+                    edge.flags|=0x8422;edge.upper_bottom=ceil>edge.floor_height ? ceil : edge.floor_height;
+                } else if(edge.ceiling_height<ceil)edge.flags|=0x500;
+                if(edge.ceiling_height>=scene->view_z)edge.flags|=0x120;
+            }
+            if(floor>edge.floor_height) {edge.flags|=0x800c;edge.lower_top=floor;}
+            else if(floor<edge.floor_height)edge.flags|=0x88;
+            if(edge.floor_height<scene->view_z)edge.flags|=0xc0;
+        }
+        bool complete=true;
+        for(unsigned c=0;c<2;c++) {
+            if(!(edge.flags&(c ? 4 : (1|2))))continue;
+            unsigned id=rom[fa+((flags&1) ? 1 : 2+c)];
+            if(!textures[alt][id].valid) {complete=false;break;}
+            edge.texture[c]=textures[alt][id].address;
+            edge.texture_h[c]=textures[alt][id].h;
+            edge.texture_w[c]=textures[alt][id].w;
+            bool pegged=(flags&((c || (flags&1)) ? 64 : 32))!=0;
+            if(pegged)edge.texture_h[c]|=1;
+            edge.texture_origin[c]=pegged ? edge.ceiling_height : c ? edge.lower_top :
+                (flags&1) ? edge.floor_height : edge.upper_bottom;
+        }
+        if(!complete)continue;
+        if(alt)edge.flags|=0x1000;
+        edge.offset_x=raw[5];edge.offset_y=raw[6];edge.world_uv=true;
+        edge.length=hypot(edge.x2-edge.x1,edge.z2-edge.z1);
+        scene->segments[scene->count++]=edge;recovered++;
+    }
+    return recovered;
 }
 /* The native two-pixel occlusion test can omit a wall which still covers a
  * high-resolution corner. Merge the independent visibility cameras before
@@ -284,9 +395,10 @@ static inline void DoomResolutionPrepareRays(DoomResolutionScene *scene) {
     }
     scene->rays_ready=true;
 }
-static inline unsigned DoomResolutionHits(const DoomResolutionScene *scene,
-    double ray, double depth_ratio, DoomResolutionHit *hits) {
+static inline unsigned DoomResolutionCollectHits(const DoomResolutionScene *scene,
+    double ray, double depth_ratio, DoomResolutionHit *hits, bool stop_at_solid) {
     unsigned n = 0;
+    double opaque_depth=INFINITY;
     double limit=scene->ray_limit>0 ? scene->ray_limit : 1.125;
     int bin=(int)floor((ray+limit)*DOOM_RES_RAY_BINS/(2*limit));
     bool indexed=scene->rays_ready && bin>=0 && bin<DOOM_RES_RAY_BINS;
@@ -303,11 +415,20 @@ static inline unsigned DoomResolutionHits(const DoomResolutionScene *scene,
          * This tolerance is a fraction of a texel, never a screen column. */
         if (t < -1e-10 || t > 1+1e-10 || z <= 0 || depth_ratio <= 0) continue;
         double depth = z / depth_ratio;
+        if(stop_at_solid && depth>opaque_depth)continue;
+        if(stop_at_solid && (s->flags&1)) {
+            opaque_depth=depth;
+            while(n && hits[n-1].depth>depth)n--;
+        }
         unsigned j = n;
         while (j && hits[j - 1].depth > depth) { hits[j] = hits[j - 1]; j--; }
         hits[j] = (DoomResolutionHit){i, depth}; n++;
     }
     return n;
+}
+static inline unsigned DoomResolutionHits(const DoomResolutionScene *scene,
+    double ray, double depth_ratio, DoomResolutionHit *hits) {
+    return DoomResolutionCollectHits(scene,ray,depth_ratio,hits,false);
 }
 static inline unsigned DoomResolutionLight(const DoomResolutionScene *scene,
     const uint8_t *sector, double depth, bool floor) {
@@ -508,7 +629,7 @@ static inline void DoomResolutionRasterColumn(DoomResolutionScene *scene,
     const bool visible[144], double *depths) {
     if (depths) for (unsigned y = 0; y < 144 * scale; y++) depths[y] = INFINITY;
     DoomResolutionHit hits[DOOM_RES_SEGMENTS];
-    unsigned count = DoomResolutionHits(scene, source_ray, depth_ratio, hits);
+    unsigned count = DoomResolutionCollectHits(scene, source_ray, depth_ratio, hits,true);
     int top = 0, bottom = 144 * scale;
     for (unsigned i = 0; i < count && top < bottom; i++) {
         DoomResolutionSegment *seg = &scene->segments[hits[i].segment];

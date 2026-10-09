@@ -7,27 +7,35 @@ With a bunch of quality of life improvements and much more to come!
 
 ## Display enhancements
 
-Open **Mods → Doom Display Enhancements** in the launcher. All three features
+Open **Mods → Doom Display Enhancements** in the launcher. These display features
 are disabled by default and can be enabled independently:
 
 - **Adaptive widescreen** renders additional world geometry at 4:3, 16:9,
   21:9, 32:9, or **Fit to window**. Fit follows the window from 4:3 through
   32:9. The original status bar and weapon stay centered.
-- **Interpolated frame rate** interpolates the camera and weapon sway between
+- **Interpolated frame rate** interpolates the camera, weapon sway and automap between
   captured game states. Choose **Auto** to follow display refresh, or 60, 90, 120, 144,
   165, 240, or 360 presentations per second. The simulation and game speed
   remain unchanged. This works with widescreen disabled, too.
 - **Higher 3D resolution** offers 2x, 3x and 4x world rasterization. At 4:3,
   the 3D viewport is 432x288, 648x432 or 864x576 respectively. Widescreen
   increases its width further. Wall geometry and original wall textures are
-  sampled at the new resolution. Objects are sampled directly from their
+  sampled at the new resolution. Automap walls and arrows are also drawn at
+  the selected resolution. Objects are sampled directly from their
   original artwork at the selected
   resolution, with filtering for distant objects. HUD and weapon artwork retain
   their original pixel art. This works independently of the other display toggles.
   Start with 2x; higher levels increase CPU cost. Disable the toggle to return
   to native world rendering. Save data and gameplay speed are unaffected.
+  In-game menus retain the high-resolution background and apply the original
+  white tint across the widescreen view. Menu lettering stays centered.
 
-See [resolution implementation and validation](tests/HIGHER_RESOLUTION.md).
+- **Transparent automap** places map lines over a lightly dimmed live 3D view.
+  It works independently of the resolution and frame-rate options, and follows
+  them when enabled. Native map controls, discovery and cheat arrows are preserved.
+
+See [resolution implementation and validation](tests/HIGHER_RESOLUTION.md)
+and [automap implementation and validation](tests/AUTOMAP.md).
 
 ## Unlocked episodes
 
@@ -60,6 +68,9 @@ Typing is ignored while a host panel is open or the game is unfocused.
 See [cheat validation](tests/CHEATS.md).
 
 ## Modern keyboard and mouse
+
+The host's **P** pause shortcut is disabled. Use Doom's own pause control
+(Enter with modern controls, or your configured SNES Start button).
 
 Enable **Mods → Doom Display Enhancements → Modern keyboard + mouse**.
 The option is off by default. Set player 1's input source to **Keyboard**.

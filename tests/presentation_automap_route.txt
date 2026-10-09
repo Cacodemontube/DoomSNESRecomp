@@ -1,0 +1,33 @@
+# Native-map decisions and simulation must stay identical in every display mode.
+wait 400
+press start 1
+wait 150
+press start 1
+wait 150
+press a 1
+wait 150
+press a 1
+wait 500
+dump gameplay
+press select 12
+wait 36
+dump map-open
+press up 120
+dump map-forward
+press right 90
+dump map-turn
+press y 24
+wait 24
+dump map-zoom
+press up+left 120
+dump map-moving-turn
+press start 24
+wait 60
+dump map-pause
+press start 24
+wait 120
+dump map-resumed
+press select 12
+wait 60
+dump map-closed
+quit

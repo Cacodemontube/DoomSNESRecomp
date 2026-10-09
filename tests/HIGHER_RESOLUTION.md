@@ -112,3 +112,32 @@ The harness creates an isolated executable/configuration and drives its own
 scripted input. It does not change the player's settings or drive a running
 personal game. Developer TCP composition/screenshot buffers accommodate the
 higher output dimensions. Native state dumps retain native dimensions.
+
+## Further corner recovery and menus
+
+High-resolution geometry also includes front-facing ROM map edges omitted
+by every native visibility camera. The USA WALLS and alternate-ID table
+addresses are checked against their GSU instructions before decoding.
+Current private sector heights supply moving-door and portal clipping;
+texture offsets, density and pegging keep the existing world alignment.
+This recovery works at both 4:3 and widescreen. Ray sorting discards hits
+behind the nearest solid wall, with an exhaustive-prefix oracle test.
+
+Native menu IRQ phases retain the level snapshot beyond the normal history
+timeout. Scanline color math supplies the original white tint throughout
+the extended viewport. Mode 3 BG2 and visible OBJ extraction preserve
+centered native lettering and the skull cursor over the frozen high-resolution
+background. Weapon artwork remains frozen, and fades still follow native
+scanout. Presentation dimensions continue using the selected scale.
+
+`geometry-complete5-4x` captures E3M1, E3M8, E1M1, E3M2 and E3M3,
+including long menu holds, at 4x with interpolation. All replay failure
+counters remained zero. `geometry-normal-final-4x` checks 4:3, and
+`automap-geometry-final-4x` checks transparent, interpolated automap and
+returning to gameplay. `geometry-release-native-state-4x` matches
+`resolution-native-state-final` byte for byte in its CPU trace and all
+156 native dump artifacts. These checks do not prove that every possible
+viewpoint is free of visual artifacts. The release preview uses
+`tests/presentation_menu_route.txt`, holding the native menu for 300 fields;
+`menu-release-preview2-4x` captures its presented frame at field 1900,
+including the retained weapon and complete status bar across menu setup.

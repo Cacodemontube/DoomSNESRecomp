@@ -29,7 +29,7 @@ static Ppu ppu;
 Snes *g_snes = &machine;
 Ppu *g_ppu = &ppu;
 
-static bool wide_enabled, fps_enabled, resolution_enabled;
+static bool wide_enabled, fps_enabled, resolution_enabled,transparent_enabled,configured_transparent;
 static const char *resolution_option = "2";
 static unsigned configured_resolution;
 static const char *aspect_option = "Fit", *fps_option = "Auto";
@@ -38,11 +38,16 @@ static unsigned reset_calls, begin_calls, end_calls, draw_calls;
 static bool configured_wide, configured_interpolation;
 static unsigned configured_width, ended_number;
 static float drawn_alpha;
-static SNESModActivationCallback plugin_callbacks[3], reset_callback;
+static SNESModActivationCallback plugin_callbacks[4], reset_callback;
 
 int DoomInputLookEnabled(void) { return 0; }
 double DoomInputPitch(void) { return 0; }
 void DoomRendererSetLook(bool enabled, double offset) { CHECK(!enabled && offset == 0); }
+void DoomRendererSetTransparentMap(bool enabled) { configured_transparent=enabled; }
+bool DoomRendererAutomapOverlay(void) { return false; }
+bool DoomRendererDrawAutomap(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,float alpha,bool world) {
+    (void)dst;(void)pitch;(void)width;(void)scale;(void)alpha;(void)world;return false;
+}
 
 /* Exercise the production adapter against the actual framework contracts.
  * The runtime itself is replaced only at its public query/registration API. */
@@ -53,6 +58,7 @@ int snes_mod_register_presentation_plugin(const char *id,
     if (!strcmp(id, "doom.presentation.widescreen")) index = 0;
     else if (!strcmp(id, "doom.presentation.fps")) index = 1;
     else if (!strcmp(id, "doom.presentation.resolution")) index = 2;
+    else if (!strcmp(id, "doom.presentation.automap")) index = 3;
     else { CHECK(0 && "unexpected presentation plugin id"); return 0; }
     CHECK(!plugin_callbacks[index]);
     plugin_callbacks[index] = callback;
@@ -72,6 +78,7 @@ int snes_mod_runtime_feature_enabled_c(const char *package, const char *feature)
     CHECK(feature);
     if (!strcmp(feature, "widescreen")) return wide_enabled;
     if (!strcmp(feature, "render-resolution")) return resolution_enabled;
+    if (!strcmp(feature, "transparent-automap")) return transparent_enabled;
     CHECK(!strcmp(feature, "presentation-fps"));
     return fps_enabled;
 }
@@ -109,6 +116,10 @@ void DoomRendererSetResolution(unsigned scale) { configured_resolution = scale; 
 void DoomRendererDrawMessages(uint8_t *dst,size_t pitch,unsigned width,unsigned scale) {
     (void)dst;(void)pitch;(void)width;(void)scale;
 }
+void DoomRendererDrawMenu(uint8_t *dst,size_t pitch,unsigned width,unsigned scale) {
+    (void)dst;(void)pitch;(void)width;(void)scale;
+}
+void DoomRendererRememberHud(const uint8_t *field) {(void)field;}
 bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch, unsigned width, unsigned scale) {
     (void)dst; (void)pitch; (void)width; (void)scale; return true;
 }
@@ -197,8 +208,14 @@ static void SetOptions(bool wide, const char *aspect, bool fps, const char *rate
 }
 
 static void settings_tests(void) {
-    CHECK(registered_plugins == 3 && registered_reset == 1);
+    CHECK(registered_plugins == 4 && registered_reset == 1);
     int width, height;
+    transparent_enabled=true;plugin_callbacks[3]();
+    DoomPresentationPrepare(1920,1080,&width,&height);
+    CHECK(configured_transparent && DoomPresentationKeepDebt());
+    CHECK(width==256 && height==224 && !configured_interpolation);
+    transparent_enabled=false;reset_callback();
+    DoomPresentationBeforeFrame();CHECK(!configured_transparent);
     SetOptions(false, "21:9", false, "144");
     CHECK(DoomPresentationRate(165) == 0);
     CHECK(!DoomPresentationKeepDebt());

@@ -49,6 +49,14 @@ static void Move(SuperFx *fx) {
     CHECK(!superfx_is_running(fx));
 }
 int main(void) {
+    SDL_Event pause={0};pause.type=SDL_KEYDOWN;
+#if SNESRECOMP_SDL3
+    pause.key.key=SDLK_p;
+#else
+    pause.key.keysym.sym=SDLK_p;
+#endif
+    CHECK(DoomInputEvent(&pause));
+    pause.type=SDL_KEYUP;CHECK(DoomInputEvent(&pause));
     uint8_t *rom=calloc(1,0x200000),*ram=calloc(1,0x10000);CHECK(rom&&ram);
     const uint8_t entry[]={0x29,0x10,0xa1,0x20,0x71,0x09,0x07,0x01};
     const uint8_t load[]={0xa0,0x14,0x3d,0xa1,0xc6,0x51,0x40,0x56,0x3f,0x71,0x90};
@@ -64,6 +72,7 @@ int main(void) {
     CHECK(DoomInputKeyboard(keys,0,0x123)==0x123);
     DoomInputBeforeFrame();CHECK(!fx->pc_hook_count);
     selected=1;DoomInputBeforeFrame();CHECK(fx->pc_hook_count==3);
+    pause.type=SDL_KEYDOWN;CHECK(DoomInputEvent(&pause));
     SDL_Event menu={0};menu.type=SDL_MOUSEMOTION;menu.motion.yrel=48;
     CHECK(DoomInputEvent(&menu));
     CHECK(DoomInputAuxiliary(0,0)==(1u<<5));CHECK(DoomInputAuxiliary(0,0)==(1u<<5));

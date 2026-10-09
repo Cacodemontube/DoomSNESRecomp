@@ -337,6 +337,19 @@ int main(void) {
         CHECK(n==reference);
         for(unsigned j=0;j<n;j++)CHECK(indexed[j].segment==exhaustive[j].segment && indexed[j].depth==exhaustive[j].depth);
     }
+    /* Removing hits behind the nearest solid wall must keep the exact
+     * exhaustive prefix, including shared-depth corners. */
+    for(unsigned i=0;i<scene->count;i++)scene->segments[i].flags=i%7==0 ? 1 : 0;
+    for(int r=-650;r<=650;r++) {
+        double ray=r/200.0;
+        unsigned all=DoomResolutionHits(scene,ray,1,exhaustive);
+        double stop=INFINITY;
+        for(unsigned j=0;j<all;j++)if(scene->segments[exhaustive[j].segment].flags&1) {stop=exhaustive[j].depth;break;}
+        unsigned expected=0;while(expected<all && exhaustive[expected].depth<=stop)expected++;
+        unsigned n=DoomResolutionCollectHits(scene,ray,1,indexed,true);
+        CHECK(n==expected);
+        for(unsigned j=0;j<n;j++)CHECK(indexed[j].segment==exhaustive[j].segment && indexed[j].depth==exhaustive[j].depth);
+    }
     /* A wall culled in the centre's native two-pixel visibility list can
      * still cover a high-resolution corner. Recover it from a side view
      * without changing its texture anchor, and deduplicate shared walls. */
@@ -360,6 +373,43 @@ int main(void) {
     CHECK(DoomResolutionHits(scene,0.625,1,indexed)==1);
     CHECK(fabs(indexed[0].depth-128)<1e-9);
     CHECK(fabs(DoomResolutionWallCoordinate(&scene->segments[indexed[0].segment],0.625)-23)<1e-9);
+    /* A subpixel wall missing from every native camera is recovered from
+     * map topology, with the existing patch and exact texture phase. */
+    memset(ram,0,0x10000);memset(views,0,3*sizeof(*views));
+    ram[0x7e]=0x40;word(ram+0x8e,2);word(ram+0x84,(0x6000-vertex_base)&0xffff);
+    word(ram+0x88,0x7000-11);word(ram+0x92,1);word(ram+0x94,0x7100);
+    word(rom+0x6000,128);word(rom+0x6002,96);
+    word(rom+0x6004,128);word(rom+0x6006,(unsigned)-96);
+    word(rom+0x7000,vertex_base);word(rom+0x7002,vertex_base+4);
+    rom[0x7004]=1;rom[0x7005]=7;rom[0x7100]=0;rom[0x7101]=6;
+    rom[0x7110]=0;rom[0x7111]=6;
+    views[0].count=1;views[0].segments[0]=(DoomResolutionSegment){
+        .flags=1,.face=0x7110,.texture={0x686},.texture_h={128},.texture_w={127}};
+    scene->count=0;scene->view_z=32;scene->ray_limit=3.25;
+    word(scene->sectors+2,0);word(scene->sectors+4,64);
+    CHECK(DoomResolutionRecoverEdges(scene,views,ram,rom,0x200000)==1);
+    CHECK(scene->segments[0].texture[0]==0x686 && scene->segments[0].offset_x==7);
+    CHECK(scene->segments[0].flags==(0x8201|0x20|0x40));
+    CHECK(fabs(DoomResolutionWallCoordinate(&scene->segments[0],0)-103)<1e-9);
+    CHECK(DoomResolutionRecoverEdges(scene,views,ram,rom,0x200000)==0);
+    scene->count=0;rom[0x7101]=9;
+    CHECK(DoomResolutionRecoverEdges(scene,views,ram,rom,0x200000)==0);
+    rom[0x7101]=6;word(rom+0x7000,vertex_base+4);word(rom+0x7002,vertex_base);
+    CHECK(DoomResolutionRecoverEdges(scene,views,ram,rom,0x200000)==0);
+    /* Retail table decoding works even when no camera saw this texture,
+     * and follows the live alternate ID rather than a stale frame cache. */
+    word(rom+0x7000,vertex_base);word(rom+0x7002,vertex_base+4);
+    memcpy(rom+0x4403,(uint8_t[]){0xa3,0,0xa4,0x5b},4);
+    memcpy(rom+0x4467,(uint8_t[]){0xf1,0x36,0x4c},3);
+    rom[0x4472]=0xa1;rom[0x4473]=0x7e;
+    memset(views,0,3*sizeof(*views));rom[0x7101]=8;
+    word(rom+0x1b0008,0x100);rom[0x1b017e]=64;rom[0x1b017f]=63;
+    CHECK(DoomResolutionRecoverEdges(scene,views,ram,rom,0x200000)==1);
+    CHECK(scene->segments[0].texture[0]==0x17e && scene->segments[0].texture_h[0]==64);
+    scene->count=0;rom[0x7004]=0x11;ram[0x4c36+8]=6;
+    word(rom+0x1b0006,0x200);rom[0x1b027e]=128;rom[0x1b027f]=127;
+    CHECK(DoomResolutionRecoverEdges(scene,views,ram,rom,0x200000)==1);
+    CHECK(scene->segments[0].texture[0]==0x27e);
     free(views);
     free(scaled);
     free(out); /* Newly rasterized subpixels, not duplicated native pixels. */

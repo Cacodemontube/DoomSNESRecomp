@@ -1,0 +1,2 @@
+// Keep the executable icon identical in the setup and playable builds.
+IDI_DOOM ICON "doom.ico"

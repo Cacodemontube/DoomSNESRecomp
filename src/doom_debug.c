@@ -166,7 +166,7 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         send("{\"ok\":false,\"error\":\"presentation_stats takes no arguments\"}");
         return 1;
     }
-    char json[1024];
+    char json[1536];
     LOCK();
     snprintf(json, sizeof(json),
         "{\"ok\":true,\"frame\":%u,\"p1_input\":%u,\"p2_input\":%u,\"supported\":%s,\"has_snapshot\":%s,"
@@ -176,6 +176,9 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         "\"weapon_offset_x\":%d,\"weapon_offset_y\":%d,"
         "\"weapon_tiles\":%u,\"weapon_layout_fallbacks\":%llu,\"weapon_translucent\":%s,"
         "\"invisibility_ticks\":%u,\"resolution_scale\":%u,\"resolution_segments\":%u,"
+        "\"recovered_edges\":%u,\"menu_active\":%s,"
+        "\"automap_active\":%s,\"automap_transparent\":%s,\"automap_lines\":%u,"
+        "\"automap_draws\":%llu,\"automap_interpolated_presentations\":%llu,"
         "\"draw_calls\":%llu,\"draw_total_ms\":%.6f,\"draw_max_ms\":%.6f}",
         frame, p1, p2, stats.supported ? "true" : "false", stats.has_snapshot ? "true" : "false",
         (unsigned long long)stats.captures, (unsigned long long)stats.camera_passes,
@@ -187,6 +190,9 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         stats.weapon_tiles, (unsigned long long)stats.weapon_layout_fallbacks,
         stats.weapon_translucent ? "true" : "false", invisibility_ticks,
         stats.resolution_scale, stats.resolution_segments,
+        stats.recovered_edges,stats.menu_active ? "true" : "false",
+        stats.automap_active ? "true" : "false",stats.automap_transparent ? "true" : "false",stats.automap_lines,
+        (unsigned long long)stats.automap_draws,(unsigned long long)stats.automap_interpolated_presentations,
         draws, draw_total_ms, draw_max_ms);
     UNLOCK();
     send(json);

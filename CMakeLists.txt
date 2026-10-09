@@ -51,6 +51,14 @@ add_executable(DoomSNESRecomp
     src/doom_episodes.c
 )
 
+if(WIN32)
+    enable_language(RC)
+    target_sources(DoomSNESRecomp PRIVATE assets/windows/doom.rc)
+    set_source_files_properties(assets/windows/doom.rc PROPERTIES
+        OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/assets/windows/doom.ico")
+    target_include_directories(DoomSNESRecomp PRIVATE assets/windows)
+endif()
+
 # ROM identity. rom_identity.txt is the one place the digests live: the build
 # turns it into snesrecomp_rom_identity.h (SNESRECOMP_ROM_EXPECTED_SHA256 and
 # friends) for src/main.c, and tools/regen.sh, scripts/package_release.sh and
@@ -184,6 +192,12 @@ if(BUILD_TESTING)
         target_link_libraries(doom_resolution_test PRIVATE m)
     endif()
     add_test(NAME doom_resolution COMMAND doom_resolution_test)
+    add_executable(doom_automap_test tests/test_doom_automap.c)
+    target_include_directories(doom_automap_test PRIVATE src)
+    if(NOT MSVC)
+        target_link_libraries(doom_automap_test PRIVATE m)
+    endif()
+    add_test(NAME doom_automap COMMAND doom_automap_test)
     add_executable(doom_weapon_test tests/test_doom_weapon.c)
     target_include_directories(doom_weapon_test PRIVATE src)
     if(NOT MSVC)
