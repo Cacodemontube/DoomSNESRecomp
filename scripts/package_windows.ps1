@@ -38,7 +38,7 @@ while ($queue.Count) {
     foreach ($line in $imports) {
         if ($line -notmatch 'DLL Name:\s*(\S+)') { continue }
         $dll = $Matches[1]
-        if ($dll -match $system -or $seen.ContainsKey($dll.ToLowerInvariant())) { continue }
+        if ($dll -match '^(api-ms-|ext-ms-)' -or $dll -match $system -or $seen.ContainsKey($dll.ToLowerInvariant())) { continue }
         $seen[$dll.ToLowerInvariant()] = $true
         $source = Join-Path $build $dll
         if (!(Test-Path -LiteralPath $source)) { throw "Missing dependency: $dll" }
