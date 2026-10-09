@@ -12,6 +12,12 @@
 /* Retail USA layout, checked before use. These are private BUILD outputs,
  * not framebuffer pixels. Source: DOOM-FX rle.i and rltracew4/5.a. */
 enum { DOOM_RES_SEGMENTS = 168, DOOM_RES_SEGMENT_SIZE = 62 };
+/* Native RL->SCN tables use 128/depth vertically; the horizontal focal
+ * length includes the 1.25 SNES aspect correction. Pixel centres put native
+ * row 71 at 71.5 in the continuous projection. All world surfaces and
+ * billboard feet must share this projection, including plane depth tests. */
+#define DOOM_RES_VERTICAL_FOCAL 128.0
+#define DOOM_RES_HORIZON 71.5
 typedef struct DoomResolutionUv {
     float v, step;
     uint8_t u, y;
@@ -19,6 +25,7 @@ typedef struct DoomResolutionUv {
 } DoomResolutionUv;
 typedef struct DoomResolutionSprite {
     double x, depth, bottom;
+    int16_t screen_left;
     uint16_t image, identity;
     uint8_t width, height, flip, map;
 } DoomResolutionSprite;
@@ -167,7 +174,7 @@ static inline unsigned DoomResolutionLight(const DoomResolutionScene *scene,
     unsigned bright = sector[1] > scene->light_adjust ? sector[1] - scene->light_adjust : 0;
     unsigned dark = floor ? (2 * bright + 8 < 247 ? 2 * bright + 8 : 247)
                           : (2 * bright < 255 ? 2 * bright : 255);
-    double scale = DOOM_FOCAL / fmax(1, depth);
+    double scale = DOOM_RES_VERTICAL_FOCAL / fmax(1, depth);
     double level = scale >= 1 ? bright : dark - scale * (dark - bright);
     return (unsigned)fmax(bright, fmin(dark, level)) >> 3;
 }
@@ -189,8 +196,8 @@ static inline void DoomResolutionPlane(DoomResolutionScene *scene,
             color = rom[DoomSkyRomOffset((uint16_t)angle,
                 (int)floor(rx + 108), (unsigned)sky_y, scene->sky2)];
         } else {
-            double sy = ((y + 0.5) / scale - 72 - scene->horizon_offset);
-            double depth = fabs(sy) > 1e-9 ? fabs(height * DOOM_FOCAL / sy) : 7168;
+            double sy = ((y + 0.5) / scale - DOOM_RES_HORIZON - scene->horizon_offset);
+            double depth = fabs(sy) > 1e-9 ? fabs(height * DOOM_RES_VERTICAL_FOCAL / sy) : 7168;
             plane_depth = depth;
             unsigned row = DoomResolutionLight(scene, sector, depth, true);
             row += (((unsigned)floor(rx) ^ native_y) & 1) ? 0 : 1;
@@ -218,7 +225,7 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
     if (a < 0) a = b;
     if (b > 107) b = a;
     bool native_uv = a >= 0 && b <= 107;
-    double centre_v = 0, native_step = depth / DOOM_FOCAL;
+    double centre_v = 0, native_step = depth / DOOM_RES_VERTICAL_FOCAL;
     if (native_uv) {
         const DoomResolutionUv *left = &seg->uv[component][a], *right = &seg->uv[component][b];
         double t = a == b ? 0 : fmax(0, fmin(1, (native_x / 2 - a) / (b - a)));
@@ -236,7 +243,7 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
         if (!v_period) v_period = 256;
         vr = vl + remainder(vr - vl, (double)v_period);
         centre_v = (1-t)*vl + t*vr;
-        native_step = depth / DOOM_FOCAL;
+        native_step = depth / DOOM_RES_VERTICAL_FOCAL;
     }
     unsigned h;
     const uint8_t *column = DoomResolutionTextureColumn(scene, rom, rom_size, seg, component, u, &h);
@@ -246,7 +253,7 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
     for (int y = from; y < to; y++) {
         unsigned native_y = (unsigned)y / scale;
         if (!visible[native_y]) continue;
-        double world_z = scene->view_z + (72 + scene->horizon_offset - (y + 0.5) / scale) * depth / DOOM_FOCAL;
+        double world_z = scene->view_z + (DOOM_RES_HORIZON + scene->horizon_offset - (y + 0.5) / scale) * depth / DOOM_RES_VERTICAL_FOCAL;
         double origin = seg->texture_h[component] & 1
             ? DoomResolutionSigned(sector + 4) : bottom_height;
         double texture_v = native_uv
@@ -261,7 +268,7 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
 }
 static inline int DoomResolutionClipY(double height, double depth,
     unsigned scale, int min, int max, double horizon_offset) {
-    double y = ceil((72 + horizon_offset - height * DOOM_FOCAL / depth) * scale - 0.5);
+    double y = ceil((DOOM_RES_HORIZON + horizon_offset - height * DOOM_RES_VERTICAL_FOCAL / depth) * scale - 0.5);
     if (y <= min) return min;
     if (y >= max) return max;
     return (int)y;
@@ -360,6 +367,7 @@ static inline void DoomResolutionCaptureSprites(DoomResolutionScene *scene,
         sprite->depth=DoomResolutionSigned(p);
         sprite->x=DoomResolutionSigned(p+6);
         sprite->bottom=DoomResolutionSigned(p+8);
+        sprite->screen_left=DoomResolutionSigned(p+10);
         sprite->height=p[14];sprite->width=p[15];
         sprite->flip=p[21];
         unsigned start=DoomResolutionWord(p+22), end=DoomResolutionWord(p+24);
@@ -420,25 +428,30 @@ static inline void DoomResolutionSprites(DoomResolutionScene *scene,
         DoomResolutionSprite *sprite=&scene->sprites[i];
         if(sprite->depth<=0 || !sprite->width || !sprite->height ||
             sprite->map<0xde || sprite->map>0xfe)continue;
-        double u=source_ray*sprite->depth-sprite->x+sprite->width/2.0;
+        /* RLVObjs supplies the original integer left edge. RLTraceO3 samples
+         * horizontally at aspect-adjusted depth (1.25), while RLTraceO uses
+         * the unadjusted 128/depth scale vertically. Sharing the wall focal
+         * length on both axes makes the original artwork 20% too short. */
+        double u=(108+source_ray*DOOM_FOCAL-sprite->screen_left)*sprite->depth/DOOM_FOCAL;
         double footprint=sprite->depth/(DOOM_FOCAL*scale);
         double spread=footprint>1 ? footprint/4 : 0;
         if(u<-spread || u>=sprite->width+spread)continue;
         double depth=sprite->depth/ratio;
-        double top=(72+scene->horizon_offset-(sprite->bottom+sprite->height)*DOOM_FOCAL/depth)*scale;
-        double bottom=(72+scene->horizon_offset-sprite->bottom*DOOM_FOCAL/depth)*scale;
+        const double vertical_focal=DOOM_RES_VERTICAL_FOCAL;
+        double top=(DOOM_RES_HORIZON+scene->horizon_offset-(sprite->bottom+sprite->height)*vertical_focal/depth)*scale;
+        double bottom=(DOOM_RES_HORIZON+scene->horizon_offset-sprite->bottom*vertical_focal/depth)*scale;
         int first=(int)fmax(0,fmin(144*scale,ceil(top-0.5)));
         int last=(int)fmax(0,fmin(144*scale,ceil(bottom-0.5)));
         for(int y=first;y<last;y++) {
             unsigned ny=y/scale;
             if(!visible[ny] || depth>depths[y]+0.001)continue;
-            double v=(71.5+scene->horizon_offset-(y+0.5)/scale)*depth/DOOM_FOCAL-sprite->bottom;
+            double v=(71.5+scene->horizon_offset-(y+0.5)/scale)*depth/vertical_focal-sprite->bottom;
             uint32_t *target=&((uint32_t*)(dst+(size_t)(y+23*scale)*pitch))[x];
             unsigned red=0,green=0,blue=0,covered=0;
             unsigned taps=spread>0 ? 4 : 1;
             for(unsigned tap=0;tap<taps;tap++) {
                 int tu=(int)floor(u+(tap&1 ? spread : -spread));
-                int tv=(int)floor(v+(tap&2 ? spread : -spread));
+                int tv=(int)floor(v+(tap&2 ? spread : -spread)*DOOM_FOCAL/vertical_focal);
                 unsigned raw=0;
                 if(tu>=0 && tu<sprite->width && tv>=0 && tv<sprite->height) {
                     const uint8_t *column=DoomResolutionSpriteColumn(scene,rom,size,sprite,tu);

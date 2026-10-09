@@ -81,17 +81,17 @@ int main(void) {
     seg->uv[0][43]=(DoomResolutionUv){.u=11,.v=130,.step=1,.y=71,.valid=true};
     uint32_t *out=calloc(512*448,4);CHECK(out);
     DoomResolutionWall(scene,rom,0x200000,seg,0,(85.0-108)/DOOM_FOCAL,
-        DOOM_FOCAL,64,10,142,144,2,(uint8_t*)out,512*4,palette,visible,NULL);
+        128,64,10,142,144,2,(uint8_t*)out,512*4,palette,visible,NULL);
     CHECK(out[(142+46)*512+10]==(0xff000000u|73u));
     seg->uv[0][42].v=130;seg->uv[0][43].v=2;
     DoomResolutionWall(scene,rom,0x200000,seg,0,(85.0-108)/DOOM_FOCAL,
-        DOOM_FOCAL,64,10,142,144,2,(uint8_t*)out,512*4,palette,visible,NULL);
+        128,64,10,142,144,2,(uint8_t*)out,512*4,palette,visible,NULL);
     CHECK(out[(142+46)*512+10]==(0xff000000u|73u));
     /* Original object-image columns retain transparency and source detail;
      * a nearer wall's depth prevents the object from showing through it. */
     scene->sprite_count=1;
     scene->sprites[0]=(DoomResolutionSprite){.x=0,.depth=1000,.bottom=-10,
-        .width=64,.height=64,.image=0x1000,.map=0xde};
+        .screen_left=105,.width=64,.height=64,.image=0x1000,.map=0xde};
     for(unsigned u=0;u<64;u++) {
         unsigned table=0x1a1002+u*3,address=0x10000+u*128;
         word(rom+table,address&0xffff);rom[table+2]=0x41;
@@ -102,11 +102,59 @@ int main(void) {
     DoomResolutionSprites(scene,rom,0x200000,0,1,256,2,(uint8_t*)out,
         512*4,palette,visible,depths);
     CHECK(out[(140+46)*512+256]!=0xff101010);
+    /* Native RLTraceO projects height at 128/depth, independently of the
+     * horizontal SNES aspect correction. The former square projection
+     * omitted this upper part of the sprite. */
+    CHECK(out[(131+46)*512+256]!=0xff101010);
     for(unsigned y=0;y<288;y++)depths[y]=10;
     for(unsigned i=0;i<512*448;i++)out[i]=0xff101010;
     DoomResolutionSprites(scene,rom,0x200000,0,1,256,2,(uint8_t*)out,
         512*4,palette,visible,depths);
     for(unsigned y=0;y<448;y++)CHECK(out[y*512+256]==0xff101010);
+    /* Preserve native proportions and the supplied left edge at every
+     * supported resolution, including the scale-1 mouse-look redraw. */
+    uint32_t *scaled=calloc(1024*896,4);CHECK(scaled);
+    double scaled_depths[576];
+    for(unsigned scale=1;scale<=4;scale++) {
+        for(unsigned j=0;j<1024*896;j++)scaled[j]=0xff101010;
+        for(unsigned y=0;y<144*scale;y++)scaled_depths[y]=INFINITY;
+        DoomResolutionSprites(scene,rom,0x200000,0,1,128*scale,scale,
+            (uint8_t*)scaled,1024*4,palette,visible,scaled_depths);
+        unsigned painted=0;
+        for(unsigned y=0;y<144*scale;y++)
+            painted+=scaled[(y+23*scale)*1024+128*scale]!=0xff101010;
+        CHECK(painted>=8*scale && painted<=9*scale);
+        for(unsigned y=0;y<144*scale;y++)scaled_depths[y]=INFINITY;
+        DoomResolutionSprites(scene,rom,0x200000,(104-108)/DOOM_FOCAL,1,
+            100*scale,scale,(uint8_t*)scaled,1024*4,palette,visible,scaled_depths);
+        for(unsigned y=0;y<144*scale;y++)
+            CHECK(scaled[(y+23*scale)*1024+100*scale]==0xff101010);
+    }
+    /* Floor depth must not hide the lowest sprite pixels. Exercise native
+     * and enhanced sizes, close/far objects, yawed views and mouse look. */
+    word(scene->sectors+2,0);scene->sectors[8]=200;scene->view_z=32;
+    const double distances[]={128,256,1000};
+    for(unsigned scale=1;scale<=4;scale++)
+    for(unsigned d=0;d<3;d++)
+    for(unsigned side=0;side<2;side++)
+    for(int look=-20;look<=20;look+=20) {
+        scene->horizon_offset=look;
+        DoomResolutionSprite *sprite=&scene->sprites[0];
+        sprite->depth=distances[d];sprite->bottom=-32;
+        sprite->screen_left=108-(int)(32*DOOM_FOCAL/sprite->depth);
+        double ratio=side ? 1.3 : 1.0,depth=sprite->depth/ratio;
+        int foot=DoomResolutionClipY(-32,depth,scale,0,144*scale,look);
+        for(unsigned y=0;y<144*scale;y++)scaled_depths[y]=INFINITY;
+        DoomResolutionPlane(scene,rom,0,false,0,0,128*scale,
+            0,144*scale,scale,(uint8_t*)scaled,1024*4,palette,visible,scaled_depths);
+        uint32_t before=scaled[(foot-1+23*scale)*1024+128*scale];
+        CHECK(scaled_depths[foot-1]>=depth);
+        DoomResolutionSprites(scene,rom,0x200000,0,ratio,128*scale,scale,
+            (uint8_t*)scaled,1024*4,palette,visible,scaled_depths);
+        CHECK(scaled[(foot-1+23*scale)*1024+128*scale]!=before);
+        CHECK(scaled_depths[foot-1]==depth);
+    }
+    free(scaled);
     free(out); /* Newly rasterized subpixels, not duplicated native pixels. */
     free(scene);free(ram);free(rom);
     puts("Resolution: bounded RLE, geometry validation, ray depth, subpixel detail and clipping passed");
