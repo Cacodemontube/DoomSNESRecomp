@@ -15,10 +15,19 @@ opacity, muzzle flashes and interpolation settings are retained.
 Private Super FX rendering jobs produce native visible-segment, wall-plot
 and object records. The host rasterizer samples original wall and object
 artwork directly at the selected resolution rather than enlarging the
-already rasterized world. Native wall plots provide texture columns and
-vertical phases. Interpolation uses reciprocal depth and unwraps repeating
-texture coordinates before blending, preserving native texture placement
-and avoiding stretching across a texture's wrap boundary.
+already rasterized world. Wall placement uses immutable map vertices and
+native BUILD texture offsets and vertical origins, including moving doors.
+This avoids using rounded screen samples as texture anchors. Native
+RSPDistance is twice map distance, so the wall sampler's half-scale multiply
+corresponds to one texture column per map unit, regardless of texture width.
+Aspect correction affects projection rather than texture density.
+
+Wall clipping follows the native BUILD wall, upper/lower clip and plane
+flags and its resolved heights. Sky portals leave the upper opening intact
+so taller walls behind them are not cropped at a nearer sector's sky height.
+Map vertices are projected continuously instead of reusing the GSU's
+integer rotation cache, keeping shared wall endpoints consistent across
+the widescreen visibility cameras.
 
 Object rendering uses the native visible-object list, original compressed
 image columns, palette shading and flip flags. Per-pixel depth tests hide
@@ -33,10 +42,19 @@ were checked against the original DOOM-FX rendering source.
 
 ## Validation
 
-All nine CTest tests pass, including resolution selection, texture and sprite
+The CTest suite covers resolution selection, texture and sprite
 decoding, native texture-phase wrap in both directions, sprite occlusion,
 padded pitches and guards around the world/HUD boundaries at 2x through 4x.
-The renderer state test also passes with the local US ROM.
+The renderer state test also checks lifecycle behavior with the local US ROM.
+
+Geometry regressions check biased ROM vertex addressing, matching endpoints
+in three cameras, texture placement through camera movement, sky portals
+with taller walls behind them, and real upper clips. The isolated gameplay
+harness `tests/validate_render_geometry.ps1` captures E3M1, E3M2, E3M3, E3M8
+and E1M1 while walking, turning and opening doors. Use `-Scale 2` or `-Scale 4`
+for enhanced captures, or `-Native` for the original renderer reference.
+Evidence from this correction is in `geometry-original`, `geometry-before`,
+`geometry-final-2x` and `geometry-final-4x` under `build-lag-evidence`.
 
 The isolated gameplay route at 2x produced byte-identical CPU state traces
 and all 156 native dump artifacts compared with the existing replay baseline.

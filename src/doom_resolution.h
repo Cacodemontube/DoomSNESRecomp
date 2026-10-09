@@ -19,10 +19,10 @@ enum { DOOM_RES_SCREEN_PLANE = 4 };
  * billboard feet must share this projection, including plane depth tests. */
 #define DOOM_RES_VERTICAL_FOCAL 128.0
 #define DOOM_RES_HORIZON 71.5
-/* Horizontal texture density includes the 1.25 SNES pixel aspect factor.
- * Keep this separate from projection so geometry and billboard sizes stay
- * fixed when matching the narrower native wall artwork. */
-#define DOOM_RES_WALL_TEXELS_PER_UNIT (0.5 * 1.25)
+/* RLTraceW5 halves RSPDistance, but RLBuildVSegList4 stores twice the map
+ * distance. Together they sample one column per map unit, at every width.
+ * The SNES aspect correction belongs to projection, not texture density. */
+#define DOOM_RES_WALL_TEXELS_PER_UNIT 1.0
 typedef struct DoomResolutionUv {
     float v, step;
     uint8_t u, y;
@@ -41,6 +41,7 @@ typedef struct DoomResolutionSegment {
     int16_t angle, perpendicular, texture_offset;
     uint16_t vertex[2];
     int texture_origin[2];
+    int floor_height, ceiling_height, upper_bottom, lower_top;
     bool world_uv;
     double phase_u[2], phase_v[2];
     bool phase_valid[2];
@@ -81,6 +82,24 @@ static inline unsigned DoomResolutionRomAddress(unsigned bank, unsigned address)
     return bank < 0x40 ? ((bank & 0x3f) * 0x8000 + (address & 0x7fff))
                        : ((bank & 0x1f) * 0x10000 + address);
 }
+/* Read immutable map vertices instead of the GSU's rounded rotation cache.
+ * EMVERTEXES is a biased 16-bit base: adding the RAM vertex address wraps
+ * to the corresponding ROM vertex. All cameras then share exact endpoints. */
+static inline bool DoomResolutionMapVertex(const uint8_t *ram, unsigned vertex,
+    const uint8_t *rom, size_t rom_size, double *x, double *z) {
+    unsigned count=DoomResolutionWord(ram+0x8e);
+    const unsigned base=0x3080+205*14;
+    if(!count || count>1056 || vertex<base || vertex>=base+count*4 || (vertex-base)%4)return false;
+    unsigned address=DoomResolutionRomAddress(ram[0x7e],
+        (DoomResolutionWord(ram+0x84)+vertex)&0xffff);
+    if(address+4>rom_size)return false;
+    double wx=DoomResolutionSigned(rom+address)-DoomResolutionSigned(ram+0x22);
+    double wy=DoomResolutionSigned(rom+address+2)-DoomResolutionSigned(ram+0x24);
+    double angle=DoomResolutionWord(ram+0x28)*(2*3.14159265358979323846/65536);
+    *x=wx*sin(angle)-wy*cos(angle);
+    *z=wx*cos(angle)+wy*sin(angle);
+    return true;
+}
 static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
     const uint8_t *ram, size_t size, int view_z, const uint8_t *rom, size_t rom_size) {
     scene->count = scene->sprite_count = 0;
@@ -113,6 +132,8 @@ static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
         seg->z1 = DoomResolutionSigned(ram + v1) + DOOM_RES_SCREEN_PLANE;
         seg->x2 = DoomResolutionSigned(ram + v2 + 2);
         seg->z2 = DoomResolutionSigned(ram + v2) + DOOM_RES_SCREEN_PLANE;
+        DoomResolutionMapVertex(ram,v1,rom,rom_size,&seg->x1,&seg->z1);
+        DoomResolutionMapVertex(ram,v2,rom,rom_size,&seg->x2,&seg->z2);
         seg->flags = DoomResolutionWord(p + 4);
         seg->near_sector = (near_sector - 0x3080) / 14;
         unsigned far_sector = DoomResolutionWord(p + 30);
@@ -128,6 +149,10 @@ static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
         seg->angle = (int16_t)DoomResolutionWord(p + 56);
         seg->perpendicular = (int16_t)DoomResolutionWord(p + 58);
         seg->texture_offset = (int16_t)DoomResolutionWord(p + 60);
+        seg->floor_height=view_z+DoomResolutionSigned(p+32);
+        seg->ceiling_height=view_z+DoomResolutionSigned(p+34);
+        seg->upper_bottom=view_z+DoomResolutionSigned(p+36);
+        seg->lower_top=view_z+DoomResolutionSigned(p+38);
         /* RLTraceW3 pegs flagged textures to the near ceiling. Otherwise
          * RLTraceW2 supplies floor Z for solid walls, far ceiling Z for
          * upper walls (including doors), and far floor Z for lower walls.
@@ -272,13 +297,10 @@ static inline double DoomResolutionWallCoordinate(const DoomResolutionSegment *s
         double denominator=dx-source_ray*dz;
         if(fabs(denominator)<1e-9)return NAN;
         double t=(source_ray*seg->z1-seg->x1)/denominator;
-        /* Measure along the wall from vertex 1 with SNES aspect correction.
-         * Use the same intersection as geometry, avoiding the native
-         * angle/distance lookup approximations and screen-sample phase. */
-        /* Native 64-column artwork (including doors) fills 128 map units.
-         * Applying the wall aspect adjustment here crops its final quarter. */
-        double density=seg->texture_w[0]==63 ? 0.5 : DOOM_RES_WALL_TEXELS_PER_UNIT;
-        return density*t*hypot(dx,dz)+seg->offset_x;
+        /* The native texture coordinate advances from vertex 1 to vertex 2.
+         * Keep this orientation and map-unit density for every texture;
+         * placement comes from immutable geometry, never rounded samples. */
+        return DOOM_RES_WALL_TEXELS_PER_UNIT*t*hypot(dx,dz)+seg->offset_x;
     }
     double theta = -atan(source_ray) - seg->angle * (2 * 3.14159265358979323846 / 65536);
     /* RLTraceW5 multiplies the 7-fraction-bit tangent table by RSPDistance
@@ -407,34 +429,31 @@ static inline void DoomResolutionRasterColumn(DoomResolutionScene *scene,
     int top = 0, bottom = 144 * scale;
     for (unsigned i = 0; i < count && top < bottom; i++) {
         DoomResolutionSegment *seg = &scene->segments[hits[i].segment];
-        const uint8_t *near = scene->sectors + seg->near_sector * 14;
-        int floor_z = DoomResolutionSigned(near + 2), ceiling_z = DoomResolutionSigned(near + 4);
+        int floor_z = seg->floor_height, ceiling_z = seg->ceiling_height;
         double depth = hits[i].depth;
         int cy = DoomResolutionClipY(ceiling_z - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
         int fy = DoomResolutionClipY(floor_z - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
-        DoomResolutionPlane(scene, rom, seg->near_sector, true, angle, rx, x,
+        /* Native BUILD flags distinguish a sky portal from a real ceiling
+         * clip. A sky portal must leave room for taller walls behind it. */
+        if(seg->flags&0x20)DoomResolutionPlane(scene, rom, seg->near_sector, true, angle, rx, x,
             top, cy, scale, dst, pitch, palettes, visible, depths);
-        DoomResolutionPlane(scene, rom, seg->near_sector, false, angle, rx, x,
+        if(seg->flags&0x40)DoomResolutionPlane(scene, rom, seg->near_sector, false, angle, rx, x,
             fy, bottom, scale, dst, pitch, palettes, visible, depths);
-        top = cy; bottom = fy;
         if (seg->flags & 1) {
             DoomResolutionWall(scene, rom, rom_size, seg, 0, source_ray, depth,
-                ceiling_z, x, top, bottom, scale, dst, pitch, palettes, visible, depths);
+                ceiling_z, x, cy, fy, scale, dst, pitch, palettes, visible, depths);
             break;
         }
-        if (seg->far_sector >= 205) break;
-        const uint8_t *far = scene->sectors + seg->far_sector * 14;
-        int far_floor = DoomResolutionSigned(far + 2), far_ceiling = DoomResolutionSigned(far + 4);
-        if (far_ceiling < ceiling_z) {
-            int end = DoomResolutionClipY(far_ceiling - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
+        if (seg->flags & (2|0x100)) {
+            int end = DoomResolutionClipY((seg->flags&2 ? seg->upper_bottom : ceiling_z) - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
             if (seg->flags & 2) DoomResolutionWall(scene, rom, rom_size, seg, 0,
-                source_ray, depth, ceiling_z, x, top, end, scale, dst, pitch, palettes, visible, depths);
+                source_ray, depth, ceiling_z, x, cy, end, scale, dst, pitch, palettes, visible, depths);
             top = end;
         }
-        if (far_floor > floor_z) {
-            int start = DoomResolutionClipY(far_floor - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
+        if (seg->flags & (4|0x80)) {
+            int start = DoomResolutionClipY((seg->flags&4 ? seg->lower_top : floor_z) - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
             if (seg->flags & 4) DoomResolutionWall(scene, rom, rom_size, seg, 1,
-                source_ray, depth, far_floor, x, start, bottom, scale, dst, pitch, palettes, visible, depths);
+                source_ray, depth, seg->lower_top, x, start, fy, scale, dst, pitch, palettes, visible, depths);
             bottom = start;
         }
     }

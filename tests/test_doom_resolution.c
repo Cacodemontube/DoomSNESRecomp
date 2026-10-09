@@ -26,6 +26,21 @@ int main(void) {
     CHECK(scene->count==1 && scene->segments[0].x1==-96);
     CHECK(scene->segments[0].z1==132 && scene->segments[0].z2==196);
     CHECK(scene->segments[0].world_uv);
+    /* Map endpoints must not inherit camera-dependent GSU integer rounding.
+     * EMVERTEXES is biased against the RAM cache and wraps at 16 bits. */
+    const unsigned vertex_base=0x3080+205*14;
+    word(ram+0x8e,2);word(ram+0x84,(0x6000-vertex_base)&0xffff);ram[0x7e]=0x40;
+    word(rom+0x6000,128);word(rom+0x6002,96);
+    word(rom+0x6004,128);word(rom+0x6006,(unsigned)-32);
+    for(unsigned view=0;view<3;view++) {
+        double angle=view*DOOM_SIDE_YAW;
+        word(ram+0x28,view*0x2000);
+        double x,z;
+        CHECK(DoomResolutionMapVertex(ram,vertex_base,rom,0x200000,&x,&z));
+        CHECK(fabs(x-(128*sin(angle)-96*cos(angle)))<1e-9);
+        CHECK(fabs(z-(128*cos(angle)+96*sin(angle)))<1e-9);
+    }
+    word(ram+0x28,0);word(ram+0x8e,0);
     /* Native vertical origins, including moving door ceilings, come from
      * BUILD world heights, never quantized screen samples. */
     word(ram+0x7180+4,1);word(ram+0x7180+32,(unsigned)-42);
@@ -56,9 +71,9 @@ int main(void) {
         double point_z=b*cos(yaw)+(24-eye_x)*sin(yaw);
         wall.angle=(int16_t)(frame*17);wall.perpendicular=(int16_t)(frame+50);
         wall.texture_offset=(int16_t)frame;
-        CHECK(fabs(DoomResolutionWallCoordinate(&wall,point_x/point_z)-82)<1e-9);
+        CHECK(fabs(DoomResolutionWallCoordinate(&wall,point_x/point_z)-127)<1e-9);
         wall.texture_w[0]=63;
-        CHECK(fabs(DoomResolutionWallCoordinate(&wall,point_x/point_z)-67)<1e-9);
+        CHECK(fabs(DoomResolutionWallCoordinate(&wall,point_x/point_z)-127)<1e-9);
     }
     /* Native vertex cache depths are relative to the four-unit screen
      * plane. Recover a close flat wall identically in all three cameras;
@@ -83,7 +98,8 @@ int main(void) {
     CHECK(!DoomResolutionCapture(scene,ram,0x10000,0,rom,0x200000));
     scene->count=1;
     scene->segments[0]=(DoomResolutionSegment){
-        .x1=-96,.z1=128,.x2=96,.z2=192,.flags=1,.near_sector=0,
+        .x1=-96,.z1=128,.x2=96,.z2=192,.flags=1|0x20|0x40,.near_sector=0,
+        .floor_height=-64,.ceiling_height=64,
         .far_sector=UINT16_MAX,.texture={0x100,0},
         .texture_h={128,0},.texture_w={15,0},
         .angle=0,.perpendicular=150,.texture_offset=48 };
@@ -135,6 +151,24 @@ int main(void) {
     seg->uv[0][42]=(DoomResolutionUv){.u=10,.v=2,.step=1,.y=71,.valid=true};
     seg->uv[0][43]=(DoomResolutionUv){.u=11,.v=130,.step=1,.y=71,.valid=true};
     uint32_t *out=calloc(512*448,4);CHECK(out);
+    /* A sky portal at a low sector ceiling must not cut the top off a
+     * taller solid wall behind it. Native UPPERCLIP, however, must hide it. */
+    DoomResolutionSegment saved_wall=scene->segments[0];
+    scene->count=2;
+    scene->segments[0]=(DoomResolutionSegment){.x1=-96,.x2=96,.z1=64,.z2=64,
+        .near_sector=0,.flags=0x40|0x80,.floor_height=-64,.ceiling_height=16};
+    scene->segments[1]=saved_wall;
+    scene->segments[1].z1=scene->segments[1].z2=192;
+    double portal_depth[288];
+    DoomResolutionRasterColumn(scene,rom,0x200000,0,0,0,1,10,2,
+        (uint8_t*)out,512*4,palette,visible,portal_depth);
+    CHECK(portal_depth[64]==192);
+    CHECK(out[(64+46)*512+10]!=0);
+    scene->segments[0].flags|=0x100;
+    DoomResolutionRasterColumn(scene,rom,0x200000,0,0,0,1,10,2,
+        (uint8_t*)out,512*4,palette,visible,portal_depth);
+    CHECK(isinf(portal_depth[64]));
+    scene->count=1;scene->segments[0]=saved_wall;
     DoomResolutionWall(scene,rom,0x200000,seg,0,(85.0-108)/DOOM_FOCAL,
         128,64,10,142,144,2,(uint8_t*)out,512*4,palette,visible,NULL);
     CHECK(out[(142+46)*512+10]==(0xff000000u|73u));
@@ -145,11 +179,12 @@ int main(void) {
     DoomResolutionSegment native_door={.world_uv=true,.x1=0,.z1=128,
         .x2=128,.z2=128,.texture_w={63,0}};
     CHECK(fabs(DoomResolutionWallCoordinate(&native_door,0))<1e-9);
-    CHECK(fabs(DoomResolutionWallCoordinate(&native_door,1)-64)<1e-9);
-    DoomResolutionSegment door={.perpendicular=128};
+    CHECK(fabs(DoomResolutionWallCoordinate(&native_door,1)-128)<1e-9);
+    DoomResolutionSegment door={.perpendicular=256};
     CHECK(fabs(DoomResolutionWallCoordinate(&door,0))<1e-9);
-    /* A 128-world-unit door spans one 64-column image, not two repeats. */
-    CHECK(fabs(DoomResolutionWallCoordinate(&door,1)-64)<1e-9);
+    /* Native RSPDistance is twice map distance. A 128-unit door spans one
+     * 128-column image. Smaller textures repeat with the same density. */
+    CHECK(fabs(DoomResolutionWallCoordinate(&door,1)-128)<1e-9);
     const double common_ray=108.25/DOOM_FOCAL;
     DoomResolutionSegment original=*seg;
     for(unsigned view=0;view<3;view++) {

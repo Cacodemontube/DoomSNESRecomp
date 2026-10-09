@@ -366,7 +366,8 @@ int main(int argc, char **argv)
         scene->segments[0] = (DoomResolutionSegment){
             .x1=-1000*cos(yaw)-128*sin(yaw),.z1=128*cos(yaw)-1000*sin(yaw),
             .x2=1000*cos(yaw)-128*sin(yaw),.z2=128*cos(yaw)+1000*sin(yaw),
-            .flags=1,.near_sector=0,.far_sector=UINT16_MAX};
+            .flags=1|0x20|0x40,.near_sector=0,.far_sector=UINT16_MAX,
+            .floor_height=0,.ceiling_height=64};
     }
     for (unsigned i = 0; i < 342*224; i++) output[i] = 0xffabcdef;
     /* Exclude wall-image tables so the wall band retains the sentinel;
