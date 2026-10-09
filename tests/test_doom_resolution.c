@@ -318,6 +318,49 @@ int main(void) {
         CHECK(scaled[(foot-1+23*scale)*1024+128*scale]!=before);
         CHECK(scaled_depths[foot-1]==depth);
     }
+    /* Angular bins must agree with the exhaustive intersection oracle,
+     * including eye-plane crossings and rays outside the indexed range. */
+    scene->count=64;scene->rays_ready=false;scene->ray_limit=3.25;
+    for(unsigned i=0;i<scene->count;i++)scene->segments[i]=(DoomResolutionSegment){
+        .x1=(int)(i*53%701)-350,.x2=(int)(i*97%601)-300,
+        .z1=(int)(i*71%501)-100,.z2=(int)(i*43%701)-80};
+    scene->segments[0]=(DoomResolutionSegment){.x1=-1,.x2=1,.z1=1e-8,.z2=1e-8};
+    scene->segments[1]=(DoomResolutionSegment){.x1=-1,.x2=1,.z1=-1,.z2=1e-8};
+    DoomResolutionHit exhaustive[DOOM_RES_SEGMENTS],indexed[DOOM_RES_SEGMENTS];
+    DoomResolutionPrepareRays(scene);
+    for(int r=-800;r<=800;r++) {
+        double ray=r/200.0;
+        unsigned n=DoomResolutionHits(scene,ray,1,indexed);
+        scene->rays_ready=false;
+        unsigned reference=DoomResolutionHits(scene,ray,1,exhaustive);
+        scene->rays_ready=true;
+        CHECK(n==reference);
+        for(unsigned j=0;j<n;j++)CHECK(indexed[j].segment==exhaustive[j].segment && indexed[j].depth==exhaustive[j].depth);
+    }
+    /* A wall culled in the centre's native two-pixel visibility list can
+     * still cover a high-resolution corner. Recover it from a side view
+     * without changing its texture anchor, and deduplicate shared walls. */
+    DoomResolutionScene *views=calloc(3,sizeof(*views));CHECK(views);
+    views[0].count=1;
+    views[0].segments[0]=(DoomResolutionSegment){.x1=-8,.x2=8,.z1=128,.z2=128,
+        .world_uv=true,.vertex={0x4000,0x4004}};
+    views[2].count=1;views[2].segments[0]=views[0].segments[0];
+    views[1].count=1;
+    DoomResolutionSegment wall={.x1=64,.x2=96,.z1=128,.z2=128,
+        .world_uv=true,.offset_x=7,.vertex={0x4008,0x400c}};
+    double yaw=-DOOM_SIDE_YAW;
+    views[1].segments[0]=wall;
+    views[1].segments[0].x1=wall.x1*cos(yaw)-wall.z1*sin(yaw);
+    views[1].segments[0].z1=wall.z1*cos(yaw)+wall.x1*sin(yaw);
+    views[1].segments[0].x2=wall.x2*cos(yaw)-wall.z2*sin(yaw);
+    views[1].segments[0].z2=wall.z2*cos(yaw)+wall.x2*sin(yaw);
+    CHECK(DoomResolutionHits(&views[0],0.625,1,indexed)==0);
+    DoomResolutionMergeViews(scene,views,NULL,NULL,0);
+    CHECK(scene->count==2);
+    CHECK(DoomResolutionHits(scene,0.625,1,indexed)==1);
+    CHECK(fabs(indexed[0].depth-128)<1e-9);
+    CHECK(fabs(DoomResolutionWallCoordinate(&scene->segments[indexed[0].segment],0.625)-23)<1e-9);
+    free(views);
     free(scaled);
     free(out); /* Newly rasterized subpixels, not duplicated native pixels. */
     free(scene);free(ram);free(rom);

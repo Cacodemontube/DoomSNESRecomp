@@ -45,6 +45,7 @@ enum {
     kBsp = 0xb9fe,
     kBuildB = 0xc811, kBuildC = 0xc80a,
     kDrawA = 0xe4f4, kDrawB = 0xe4eb, kDrawC = 0xe4e2,
+    kMiscA = 0xe50d, kMiscB = 0xe528, kMiscC = 0xe549,
     kViewX = 0x22, kViewY = 0x24, kViewZ = 0x26, kViewAngle = 0x28,
     kMessageCount = 0x20,
     kAutoMap = 0x1e6,
@@ -111,6 +112,8 @@ typedef struct RenderState {
     bool look_enabled;
     double horizon_offset;
     DoomResolutionScene resolution_scenes[3];
+    DoomResolutionScene geometry_scene;
+    bool geometry_ready;
     uint8_t pictures[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
     uint8_t object_pixels[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
     uint8_t message_pixels[DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
@@ -520,7 +523,8 @@ static bool RunPrivateTask(RenderJob *job, SuperFx *source, SuperFx *result,
     bool completed;
     if (job->yaw || job->floors) {
         const bool draw = source->r[15].data == kDrawA ||
-            source->r[15].data == kDrawB || source->r[15].data == kDrawC;
+            source->r[15].data == kDrawB || source->r[15].data == kDrawC ||
+            source->r[15].data == kMiscA || source->r[15].data == kMiscB || source->r[15].data == kMiscC;
         const SuperFxReplayPcHook build_hooks[] = {
             {kWallLightScale, NormalizeWallLighting, job},
             {kObjectLightScale, NormalizeObjectLighting, job},
@@ -766,6 +770,19 @@ static void ExecuteRenderJob(RenderJob *job)
         DoomResolutionCaptureSprites(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
     }
 
+    /* High-resolution walls, planes and objects are sampled by the host.
+     * Retain native BUILD and message/face stages, but avoid drawing the
+     * same world a second time at 216x144. The override is a test oracle. */
+    static const uint8_t misc_a[]={0x3d,0xa0,0x10,0xe0,0x0b,0x0e,0x01};
+    static const uint8_t misc_b[]={0x3d,0xa0,0x10,0xe0,0x0b,0x0e,0x01};
+    static const uint8_t misc_c[]={0x3d,0xa0,0x10,0xe0,0x0b,0x19,0xd0};
+    bool host_world=s.resolution_scale>1 && job->resolution_scene && job->resolution_scene->count &&
+        !getenv("DOOM_HIGHRES_NATIVE_DRAW") &&
+        !memcmp(result.rom+(kMiscA&0x7fff),misc_a,sizeof(misc_a)) &&
+        !memcmp(result.rom+(kMiscB&0x7fff),misc_b,sizeof(misc_b)) &&
+        !memcmp(result.rom+(kMiscC&0x7fff),misc_c,sizeof(misc_c));
+    if(host_world)job->resolution_scene->sky2=(ReadWord(job->ram,0x7a)&2)!=0;
+
     static const unsigned tasks[] = {kDrawA, kBuildB, kDrawB,
                                      kBuildC, kDrawC};
     static const unsigned stops[] = {0xe528, 0xc835, 0xe549, 0xc835, 0xe570};
@@ -776,14 +793,16 @@ static void ExecuteRenderJob(RenderJob *job)
          * immutable capture while the private working RAM keeps each job's
          * writes for the following job. */
         source.ram = s.ram;
-        RestartPrivateTask(&source, tasks[i]);
+        const bool draw=tasks[i]==kDrawA || tasks[i]==kDrawB || tasks[i]==kDrawC;
+        unsigned task=host_world && draw ? tasks[i]==kDrawA ? kMiscA : tasks[i]==kDrawB ? kMiscB : kMiscC : tasks[i];
+        RestartPrivateTask(&source, task);
         if (!RunPrivateTask(job, &source, &result, stops[i])) return;
         if (job->resolution_scene && (tasks[i] == kBuildB || tasks[i] == kBuildC)) {
             if(s.resolution_scale<=1)DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
             DoomResolutionCaptureSprites(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
         }
-        if (tasks[i] == kDrawA || tasks[i] == kDrawB || tasks[i] == kDrawC) {
-            DecodeThird(&result, job->picture, job->third);
+        if (draw) {
+            if(!host_world)DecodeThird(&result, job->picture, job->third);
             job->third++;
         }
     }
@@ -882,6 +901,7 @@ static void StopWorkers(void) {}
 
 static bool RenderViews(Camera camera, double fraction, bool wide)
 {
+    s.geometry_ready=false;
     if (!wide) return RenderCamera(camera, fraction, 0, s.pictures[0]);
     for (unsigned i = 0; i < 2; i++) {
         if (!s.side_ram[i]) s.side_ram[i] = malloc(s.snapshot.ram_size);
@@ -1174,11 +1194,12 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
         s.cached_generation = s.generation;
         s.cached = true;
         memcpy(s.presented_ram, s.work_ram, s.snapshot.ram_size);
-        if (wide) BuildFloorShading();
+        if (wide && s.resolution_scale<=1) BuildFloorShading();
     } else {
         s.stats.cache_hits++;
     }
     s.has_presented = true;
+    if(s.resolution_scale>1 && s.resolution_scenes[0].count)return true;
 
     const unsigned x0 = wide ? kNativeViewX : (width - 256) / 2 + kNativeViewX;
     const unsigned x1 = wide ? width - kNativeViewX : x0 + DOOM_VIEW_WIDTH;
@@ -1378,8 +1399,10 @@ static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigne
         DoomResolutionScene *scene = &s.resolution_scenes[view];
         if (!scene->count) continue;
         double depths[144 * 4];
-        DoomResolutionRasterColumn(scene, s.snapshot.rom, s.snapshot.rom_size,
-            s.cached_camera.angle, rx, (sx - 108) / DOOM_FOCAL, ratio,
+        DoomResolutionScene *geometry=wide && scale>1 ? &s.geometry_scene : scene;
+        DoomResolutionRasterColumn(geometry, s.snapshot.rom, s.snapshot.rom_size,
+            s.cached_camera.angle, rx, geometry==scene ? (sx - 108) / DOOM_FOCAL : rx/DOOM_FOCAL,
+            geometry==scene ? ratio : 1,
             x, scale, dst, pitch, s.palettes, s.visible_rows, depths);
         if (scale > 1 || (wide && view != 0))
             DoomResolutionSprites(scene, s.snapshot.rom, s.snapshot.rom_size,
@@ -1406,6 +1429,16 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
         return false;
     unsigned x0 = wide ? 20 : (width - 256) / 2 + 20;
     unsigned x1 = wide ? width - 20 : x0 + 216;
+    if(wide && scale>1 && !s.geometry_ready) {
+        DoomResolutionMergeViews(&s.geometry_scene,s.resolution_scenes,s.work_ram,
+            s.snapshot.rom,s.snapshot.rom_size);
+        DoomResolutionPrepareRays(&s.geometry_scene);
+        s.geometry_ready=true;
+    }
+    if(wide && scale>1) {
+        s.geometry_scene.horizon_offset=s.horizon_offset;
+        DoomResolutionPreparePlanes(&s.geometry_scene,scale);
+    }
     if (wide) {
         /* Sector and vertex identity identify the same native wall in all
          * visibility cameras. Prefer the central camera's texture anchor
@@ -1434,7 +1467,10 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
     for(unsigned view=0;view<3;view++) {
         s.resolution_scenes[view].horizon_offset=s.horizon_offset;
         s.resolution_scenes[view].continuous_uv=wide;
-        if(s.resolution_scenes[view].count)DoomResolutionPreparePlanes(&s.resolution_scenes[view],scale);
+        if(s.resolution_scenes[view].count && !(wide && scale>1)) {
+            DoomResolutionPrepareRays(&s.resolution_scenes[view]);
+            DoomResolutionPreparePlanes(&s.resolution_scenes[view],scale);
+        }
     }
 #ifndef DOOM_RENDERER_SYNCHRONOUS
     if(scale>1 && EnsureWorkers()) {

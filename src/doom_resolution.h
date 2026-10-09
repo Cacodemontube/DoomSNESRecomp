@@ -11,7 +11,8 @@
 
 /* Retail USA layout, checked before use. These are private BUILD outputs,
  * not framebuffer pixels. Source: DOOM-FX rle.i and rltracew4/5.a. */
-enum { DOOM_RES_SEGMENTS = 168, DOOM_RES_SEGMENT_SIZE = 62 };
+enum { DOOM_RES_NATIVE_SEGMENTS = 168, DOOM_RES_SEGMENTS = 3*168,
+       DOOM_RES_SEGMENT_SIZE = 62, DOOM_RES_RAY_BINS = 128 };
 enum { DOOM_RES_SCREEN_PLANE = 4 };
 /* Native RL->SCN tables use 128/depth vertically; the horizontal focal
  * length includes the 1.25 SNES aspect correction. Pixel centres put native
@@ -36,6 +37,7 @@ typedef struct DoomResolutionSprite {
 } DoomResolutionSprite;
 typedef struct DoomResolutionSegment {
     double x1, z1, x2, z2;
+    double length;
     uint16_t flags, near_sector, far_sector, texture[2];
     uint8_t texture_h[2], texture_w[2], offset_x, offset_y;
     int16_t angle, perpendicular, texture_offset;
@@ -59,6 +61,10 @@ static _Thread_local DoomResolutionColumn *doom_resolution_batch_columns;
 typedef struct DoomResolutionScene {
     DoomResolutionSegment segments[DOOM_RES_SEGMENTS];
     unsigned count, sprite_count;
+    uint16_t ray_segments[DOOM_RES_RAY_BINS][DOOM_RES_SEGMENTS];
+    unsigned ray_count[DOOM_RES_RAY_BINS];
+    double ray_limit;
+    bool rays_ready;
     DoomResolutionSprite sprites[28];
     uint8_t sectors[205 * 14];
     int view_z;
@@ -103,11 +109,12 @@ static inline bool DoomResolutionMapVertex(const uint8_t *ram, unsigned vertex,
 static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
     const uint8_t *ram, size_t size, int view_z, const uint8_t *rom, size_t rom_size) {
     scene->count = scene->sprite_count = 0;
+    scene->rays_ready=false;scene->ray_limit=1.125;
     scene->plane_scale=0;
     if (!ram || size < 0x10000 || !rom || rom_size < 0x200000 ||
         rom[0x1b0686] != 128 || rom[0x1b0687] != 127) return false;
     unsigned end = DoomResolutionWord(ram + 0xd6);
-    if (end < 0x7180 || end > 0x7180 + DOOM_RES_SEGMENTS * DOOM_RES_SEGMENT_SIZE ||
+    if (end < 0x7180 || end > 0x7180 + DOOM_RES_NATIVE_SEGMENTS * DOOM_RES_SEGMENT_SIZE ||
         (end - 0x7180) % DOOM_RES_SEGMENT_SIZE) return false;
     memcpy(scene->sectors, ram + 0x3080, sizeof(scene->sectors));
     unsigned count = 0;
@@ -134,6 +141,7 @@ static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
         seg->z2 = DoomResolutionSigned(ram + v2) + DOOM_RES_SCREEN_PLANE;
         DoomResolutionMapVertex(ram,v1,rom,rom_size,&seg->x1,&seg->z1);
         DoomResolutionMapVertex(ram,v2,rom,rom_size,&seg->x2,&seg->z2);
+        seg->length=hypot(seg->x2-seg->x1,seg->z2-seg->z1);
         seg->flags = DoomResolutionWord(p + 4);
         seg->near_sector = (near_sector - 0x3080) / 14;
         unsigned far_sector = DoomResolutionWord(p + 30);
@@ -166,6 +174,43 @@ static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
     }
     scene->count = count;
     return count != 0;
+}
+/* The native two-pixel occlusion test can omit a wall which still covers a
+ * high-resolution corner. Merge the independent visibility cameras before
+ * rasterizing; all retained walls use the same exact map-space projection. */
+static inline void DoomResolutionMergeViews(DoomResolutionScene *dst,
+    const DoomResolutionScene *views,const uint8_t *ram,const uint8_t *rom,size_t size) {
+    dst->count=dst->sprite_count=0;dst->rays_ready=false;dst->plane_scale=0;
+    dst->ray_limit=3.25;
+    memcpy(dst->sectors,views[0].sectors,sizeof(dst->sectors));
+    dst->view_z=views[0].view_z;dst->light_adjust=views[0].light_adjust;
+    dst->invulnerable=views[0].invulnerable;dst->sky2=views[0].sky2;
+    dst->continuous_uv=true;
+    for(unsigned view=0;view<3;view++) {
+        double yaw=view==1 ? -DOOM_SIDE_YAW : view==2 ? DOOM_SIDE_YAW : 0;
+        for(unsigned i=0;i<views[view].count;i++) {
+            const DoomResolutionSegment *s=&views[view].segments[i];
+            unsigned j;
+            for(j=0;j<dst->count;j++) {
+                const DoomResolutionSegment *other=&dst->segments[j];
+                if(s->vertex[0]==other->vertex[0] && s->vertex[1]==other->vertex[1] &&
+                    s->near_sector==other->near_sector && s->far_sector==other->far_sector &&
+                    s->flags==other->flags && s->offset_x==other->offset_x && s->offset_y==other->offset_y &&
+                    !memcmp(s->texture,other->texture,sizeof(s->texture)))break;
+            }
+            if(j<dst->count || dst->count>=DOOM_RES_SEGMENTS)continue;
+            DoomResolutionSegment *out=&dst->segments[dst->count++];*out=*s;
+            if(!ram || !DoomResolutionMapVertex(ram,s->vertex[0],rom,size,&out->x1,&out->z1)) {
+                out->x1=s->x1*cos(yaw)+s->z1*sin(yaw);
+                out->z1=s->z1*cos(yaw)-s->x1*sin(yaw);
+            }
+            if(!ram || !DoomResolutionMapVertex(ram,s->vertex[1],rom,size,&out->x2,&out->z2)) {
+                out->x2=s->x2*cos(yaw)+s->z2*sin(yaw);
+                out->z2=s->z2*cos(yaw)-s->x2*sin(yaw);
+            }
+            out->length=hypot(out->x2-out->x1,out->z2-out->z1);
+        }
+    }
 }
 /* Wall columns are signed RLE: positive counts have count literals;
  * negative counts repeat the next colour -count times. Bound every read. */
@@ -209,17 +254,54 @@ static inline const uint8_t *DoomResolutionTextureColumn(DoomResolutionScene *sc
     return cache->valid ? cache->pixels : NULL;
 }
 typedef struct DoomResolutionHit { unsigned segment; double depth; } DoomResolutionHit;
+/* Conservative angular bins eliminate unrelated walls from each ray's
+ * intersection loop. Exact segment tests still decide coverage and depth. */
+static inline void DoomResolutionPrepareRays(DoomResolutionScene *scene) {
+    if(scene->rays_ready)return;
+    double limit=scene->ray_limit>0 ? scene->ray_limit : 1.125;
+    scene->ray_limit=limit;
+    memset(scene->ray_count,0,sizeof(scene->ray_count));
+    for(unsigned i=0;i<scene->count;i++) {
+        const DoomResolutionSegment *s=&scene->segments[i];
+        double x1=s->x1,z1=s->z1,x2=s->x2,z2=s->z2;
+        if(z1<=0 && z2<=0)continue;
+        /* Clip only behind-eye endpoints. A tiny positive-depth segment
+         * still has a valid angular extent, even when both depths match. */
+        if(z1<=0) {
+            double near=fmin(1e-6,z2*0.5);
+            x1+=(x2-x1)*(near-z1)/(z2-z1);z1=near;
+        }
+        if(z2<=0) {
+            double near=fmin(1e-6,z1*0.5);
+            x2+=(x1-x2)*(near-z2)/(z1-z2);z2=near;
+        }
+        double lo=fmin(x1/z1,x2/z2),hi=fmax(x1/z1,x2/z2);
+        if(hi < -limit || lo > limit)continue;
+        int first=(int)floor((fmax(-limit,lo)+limit)*DOOM_RES_RAY_BINS/(2*limit))-1;
+        int last=(int)floor((fmin(limit,hi)+limit)*DOOM_RES_RAY_BINS/(2*limit))+1;
+        if(first<0)first=0;if(last>=DOOM_RES_RAY_BINS)last=DOOM_RES_RAY_BINS-1;
+        for(int b=first;b<=last;b++)scene->ray_segments[b][scene->ray_count[b]++]=(uint16_t)i;
+    }
+    scene->rays_ready=true;
+}
 static inline unsigned DoomResolutionHits(const DoomResolutionScene *scene,
     double ray, double depth_ratio, DoomResolutionHit *hits) {
     unsigned n = 0;
-    for (unsigned i = 0; i < scene->count; i++) {
+    double limit=scene->ray_limit>0 ? scene->ray_limit : 1.125;
+    int bin=(int)floor((ray+limit)*DOOM_RES_RAY_BINS/(2*limit));
+    bool indexed=scene->rays_ready && bin>=0 && bin<DOOM_RES_RAY_BINS;
+    unsigned candidates=indexed ? scene->ray_count[bin] : scene->count;
+    for (unsigned k = 0; k < candidates; k++) {
+        unsigned i=indexed ? scene->ray_segments[bin][k] : k;
         const DoomResolutionSegment *s = &scene->segments[i];
         double dx = s->x2 - s->x1, dz = s->z2 - s->z1;
         double denominator = dx - ray * dz;
         if (fabs(denominator) < 1e-9) continue;
         double t = (ray * s->z1 - s->x1) / denominator;
         double z = s->z1 + t * dz;
-        if (t < 0 || t > 1 || z <= 0 || depth_ratio <= 0) continue;
+        /* Shared endpoints can differ by one floating-point rounding bit.
+         * This tolerance is a fraction of a texel, never a screen column. */
+        if (t < -1e-10 || t > 1+1e-10 || z <= 0 || depth_ratio <= 0) continue;
         double depth = z / depth_ratio;
         unsigned j = n;
         while (j && hits[j - 1].depth > depth) { hits[j] = hits[j - 1]; j--; }
@@ -300,7 +382,7 @@ static inline double DoomResolutionWallCoordinate(const DoomResolutionSegment *s
         /* The native texture coordinate advances from vertex 1 to vertex 2.
          * Keep this orientation and map-unit density for every texture;
          * placement comes from immutable geometry, never rounded samples. */
-        return DOOM_RES_WALL_TEXELS_PER_UNIT*t*hypot(dx,dz)+seg->offset_x;
+        return DOOM_RES_WALL_TEXELS_PER_UNIT*t*(seg->length>0 ? seg->length : hypot(dx,dz))+seg->offset_x;
     }
     double theta = -atan(source_ray) - seg->angle * (2 * 3.14159265358979323846 / 65536);
     /* RLTraceW5 multiplies the 7-fraction-bit tangent table by RSPDistance
@@ -369,7 +451,7 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
      * interpolation jump when a widescreen ray switches source cameras.
      * The native wall angle/distance/offset above instead identify the same
      * texture point independently of which camera made it visible. */
-    double centre_v = 0, native_step = depth / DOOM_RES_VERTICAL_FOCAL;
+    double centre_v = 0;
     if (native_uv) {
         const DoomResolutionUv *left = &seg->uv[component][a], *right = &seg->uv[component][b];
         double t = a == b ? 0 : fmax(0, fmin(1, (native_x / 2 - a) / (b - a)));
@@ -387,25 +469,26 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
         if (!v_period) v_period = 256;
         vr = vl + remainder(vr - vl, (double)v_period);
         centre_v = (1-t)*vl + t*vr;
-        native_step = depth / DOOM_RES_VERTICAL_FOCAL;
     }
     unsigned h;
     const uint8_t *column = DoomResolutionTextureColumn(scene, rom, rom_size, seg, component, u, &h);
     if (!column) return;
     const uint8_t *sector = scene->sectors + seg->near_sector * 14;
     unsigned row = DoomResolutionLight(scene, sector, depth, false);
+    double origin = seg->texture_h[component] & 1
+        ? DoomResolutionSigned(sector + 4) : bottom_height;
+    const double step=depth/(DOOM_RES_VERTICAL_FOCAL*scale);
+    double base=seg->world_uv ? scene->view_z-seg->texture_origin[component]-seg->offset_y :
+        native_uv || (scene->continuous_uv && seg->phase_valid[component]) ?
+        (native_uv ? centre_v : seg->phase_v[component]) : scene->view_z-origin-seg->offset_y;
+    base+=(DOOM_RES_HORIZON+scene->horizon_offset)*depth/DOOM_RES_VERTICAL_FOCAL-0.5*step;
+    const unsigned light_base=0x1cde00+(scene->invulnerable ? 32 : row)*256;
     for (int y = from; y < to; y++) {
         unsigned native_y = (unsigned)y / scale;
         if (!visible[native_y]) continue;
-        double world_z = scene->view_z + (DOOM_RES_HORIZON + scene->horizon_offset - (y + 0.5) / scale) * depth / DOOM_RES_VERTICAL_FOCAL;
-        double origin = seg->texture_h[component] & 1
-            ? DoomResolutionSigned(sector + 4) : bottom_height;
-        double texture_v = seg->world_uv ? world_z-seg->texture_origin[component]-seg->offset_y :
-            native_uv || (scene->continuous_uv && seg->phase_valid[component])
-            ? (native_uv ? centre_v : seg->phase_v[component]) + (71.5 + scene->horizon_offset - (y + 0.5) / scale) * native_step
-            : world_z - origin - seg->offset_y;
+        double texture_v=base-y*step;
         unsigned v = (unsigned)(int)floor(texture_v) & (h - 1);
-        unsigned color = rom[0x1cde00 + (scene->invulnerable ? 32 : row) * 256 + column[v]];
+        unsigned color = rom[light_base + column[v]];
         ((uint32_t *)(dst + (size_t)(y + 23 * scale) * pitch))[x] =
             palettes[native_y][color];
         if (depths) depths[y] = depth;
@@ -584,6 +667,24 @@ static inline void DoomResolutionSprites(DoomResolutionScene *scene,
         double bottom=(DOOM_RES_HORIZON+scene->horizon_offset-sprite->bottom*vertical_focal/depth)*scale;
         int first=(int)fmax(0,fmin(144*scale,ceil(top-0.5)));
         int last=(int)fmax(0,fmin(144*scale,ceil(bottom-0.5)));
+        if(!spread) {
+            int tu=(int)floor(u);
+            if(tu<0 || tu>=sprite->width)continue;
+            const uint8_t *column=DoomResolutionSpriteColumn(scene,rom,size,sprite,(unsigned)tu);
+            if(!column)continue;
+            double vbase=(71.5+scene->horizon_offset)*depth/vertical_focal-sprite->bottom;
+            double vstep=depth/(vertical_focal*scale);
+            for(int y=first;y<last;y++) {
+                unsigned ny=y/scale;
+                if(!visible[ny] || depth>depths[y]+0.001)continue;
+                int tv=(int)floor(vbase-(y+0.5)*vstep);
+                if(tv<0 || tv>=sprite->height || !column[tv])continue;
+                unsigned mapped=rom[0x1c0000+(sprite->map<<8)+column[tv]];
+                ((uint32_t*)(dst+(size_t)(y+23*scale)*pitch))[x]=palettes[ny][mapped];
+                depths[y]=depth;
+            }
+            continue;
+        }
         for(int y=first;y<last;y++) {
             unsigned ny=y/scale;
             if(!visible[ny] || depth>depths[y]+0.001)continue;

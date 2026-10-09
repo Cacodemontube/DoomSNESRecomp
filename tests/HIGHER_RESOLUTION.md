@@ -77,6 +77,33 @@ machine. Higher resolutions and wider views cost additional CPU time;
 selected presentation rates remain targets rather than guarantees.
 Screenshot runs include capture overhead and are not frame-rate benchmarks.
 
+The 4x corner-stability correction combines the three native visibility
+lists into one central-camera geometry list. This retains thin walls that
+the native two-pixel occlusion test can omit and removes camera-boundary
+changes in wall clipping. Exact ROM endpoints, texture density, offsets
+and height anchors are preserved. Conservative angular bins reduce ray
+intersection work without changing the resulting hits; tests compare them
+with exhaustive intersections, including near-eye and behind-eye segments.
+
+High-resolution rendering also skips the redundant private native world
+DRAW stages and low-resolution composition. Native BUILD, face animation
+and message stages still run on private RAM. Setting the developer-only
+environment variable `DOOM_HIGHRES_NATIVE_DRAW=1` restores those DRAW stages
+for comparison. All eight E3M1/E3M8 captures (start, forward, open and turn)
+were byte-identical with this oracle. The normal low-resolution path is
+unchanged. The 4x state route also produced byte-identical CPU traces and
+all 156 native dump artifacts against `resolution-native-state-final`;
+evidence is in `geometry-stable-native-state-4x`.
+
+The paced 4x, 16:9 walking route with a 60 FPS target averaged 39.53 ms
+between presentations before this correction and 34.42 ms afterward on
+this machine, about 25 to 29 FPS. Its 95th-percentile interval fell from
+71.98 to 62.29 ms. These dummy-video, audio-disabled runs are evidence of
+reduced cost, not a guarantee of 60 FPS or a desktop/audio benchmark.
+Evidence is in `geometry-walk-baseline-4x`, `geometry-walk-fast-4x`,
+`geometry-fast-4x`, `geometry-full-oracle-4x` and
+`geometry-merged-final-4x` under `build-lag-evidence`.
+
 Repeat a controlled run with:
 
     powershell -NoProfile -ExecutionPolicy Bypass -File tests/measure_lag.ps1 -BinaryDirectory ./build -RunLabel my-resolution-run -ResolutionScale 2 -Enhancements -Aspect 16:9 -Capture
