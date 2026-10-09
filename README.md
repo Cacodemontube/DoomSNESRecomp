@@ -4,6 +4,19 @@
 A still in development, native PC port of SNES Doom! 
 With a bunch of quality of life improvements and much more to come!
 
+## Windows v0.01
+
+Download the Windows **x64** or **x86** ZIP from GitHub Releases, extract the
+whole archive, and start **DoomSNESRecomp.exe**. Select your own verified
+**Doom (USA).sfc** ROM in the launcher. Keep `assets/` and `mods/` beside the
+executable. The Windows executable icon is generated from `logo1.png`.
+
+The runtime ZIPs can be reproduced with
+`scripts/package_windows.ps1 -BuildDirectory build-v001-x64 -Architecture x64`
+(substitute `x86` for a 32-bit build). They contain the executable, runtime
+assets, mods and licenses; ROMs, generated source and local settings are excluded.
+The existing `scripts/package_release.sh` separately produces source setup packs.
+
 
 ## Display enhancements
 
