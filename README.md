@@ -29,6 +29,14 @@ are disabled by default and can be enabled independently:
 
 See [resolution implementation and validation](tests/HIGHER_RESOLUTION.md).
 
+## Unlocked episodes
+
+Enable **Mods → Doom Unlocked Episodes → All episodes at every difficulty**
+for Super Famicom-style episode access. All three episodes are selectable
+from **I'm Too Young to Die** through **Nightmare**. Finishing E1M8 continues
+to Episode 2, and finishing E2M8 continues to Episode 3, at your selected
+difficulty. The option is off by default and works independently of cheats.
+
 ## PC keyboard cheats
 
 Enable **Mods → Doom PC Keyboard Cheats → PC keyboard cheats**. It is off

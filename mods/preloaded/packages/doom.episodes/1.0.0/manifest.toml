@@ -1,0 +1,25 @@
+format_version = 1
+id = "doom.episodes"
+version = "1.0.0"
+name = "Doom Unlocked Episodes"
+author = "DoomSNESRecomp contributors"
+description = "Super Famicom-style access to all episodes at every difficulty, with progression between episodes."
+license = "PolyForm-Noncommercial-1.0.0"
+resolver = "declarative"
+save_compatibility = "shared"
+
+[[target]]
+game_id = "doom-y"
+rom_sha256 = "d45e26eb10c323ecd480e5f2326b223e29264c3adde67f48f0d2791128e519e8"
+
+[[feature]]
+id = "unlocked-episodes"
+name = "All episodes at every difficulty"
+description = "Unlock all three episodes from I'm Too Young to Die through Nightmare. Finishing Episode 1 or 2 continues to the next episode at the selected difficulty."
+group = "Gameplay"
+default_enabled = false
+presentation_only = false
+
+[[plugin]]
+feature = "unlocked-episodes"
+id = "doom.episodes.unlocked"

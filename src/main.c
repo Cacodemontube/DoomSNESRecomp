@@ -31,6 +31,7 @@
 #include "doom_debug.h"
 #include "doom_input.h"
 #include "doom_cheats.h"
+#include "doom_episodes.h"
 #include "snesrecomp_rom_identity.h"  /* generated from rom_identity.txt */
 
 #ifndef __ANDROID__
@@ -52,8 +53,8 @@ static void EndFrame(const uint8_t *field, unsigned number) {
 }
 
 static void Reset(void) { DoomCheatsReset(); DoomInputReset(); DoomPresentationReset(); }
-static void Shutdown(void) { DoomCheatsShutdown(); DoomInputShutdown(); DoomPresentationReset(); }
-static void BeforeFrame(void) { DoomCheatsBeforeFrame(); DoomInputBeforeFrame(); DoomPresentationBeforeFrame(); }
+static void Shutdown(void) { DoomEpisodesShutdown(); DoomCheatsShutdown(); DoomInputShutdown(); DoomPresentationReset(); }
+static void BeforeFrame(void) { DoomEpisodesBeforeFrame(); DoomCheatsBeforeFrame(); DoomInputBeforeFrame(); DoomPresentationBeforeFrame(); }
 static int InputEvent(const void *event) { DoomCheatsEvent(event);return DoomInputEvent(event); }
 static void InputSuspended(int value) { DoomCheatsSuspended(value);DoomInputSuspended(value); }
 
