@@ -27,7 +27,7 @@ Get-ChildItem -LiteralPath "$stage/mods" -Recurse -File |
     Where-Object { $_.Name -in @('state.toml','state.toml.tmp') } |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName }
 # Resolve imports recursively; only Windows system libraries stay external.
-$system = '^(api-ms-|ext-ms-|kernel32|user32|gdi32|advapi32|shell32|ole32|oleaut32|comdlg32|comctl32|imm32|version|winmm|ws2_32|secur32|bcrypt|crypt32|ntdll|msvcrt|ucrtbase|setupapi|hid|cfgmgr32|dwmapi|shlwapi|opengl32|glu32|d3d[0-9]*|dxgi|dxguid|dinput8|dsound|powrprof|iphlpapi|propsys|rpcrt4|wintrust|normaliz|wldap32|winhttp|wininet|psapi|dbghelp|uxtheme|msimg32|avrt|mf|mfplat|mfreadwrite|mfuuid|ksuser)(\.|-)'
+$system = '^(api-ms-|ext-ms-|kernel32|user32|gdi32|advapi32|shell32|ole32|oleaut32|comdlg32|comctl32|imm32|version|winmm|ws2_32|secur32|bcrypt|crypt32|ntdll|msvcrt|ucrtbase|setupapi|hid|cfgmgr32|dwmapi|shlwapi|opengl32|glu32|d2d1|dwrite|d3d[0-9]*|dxgi|dxguid|dinput8|dsound|powrprof|iphlpapi|propsys|rpcrt4|wintrust|normaliz|wldap32|winhttp|wininet|psapi|dbghelp|uxtheme|msimg32|avrt|mf|mfplat|mfreadwrite|mfuuid|ksuser)(\.|-)'
 $queue = New-Object 'System.Collections.Generic.Queue[string]'
 $queue.Enqueue((Join-Path $stage 'DoomSNESRecomp.exe'))
 $seen = @{}
