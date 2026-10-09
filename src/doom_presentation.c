@@ -126,7 +126,7 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
     bool world = (settings.widescreen || settings.fps_enabled || settings.resolution_enabled || tilted) &&
         DoomRendererDraw(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight);
     if (scale == 1) {
-        if (world && tilted) DoomRendererDrawResolution(dst, pitch, width, 1);
+        if (world && tilted && !settings.widescreen) DoomRendererDrawResolution(dst, pitch, width, 1);
         if (!world || DoomInputLookEnabled()) DoomRendererDrawWeapon(g_ppu, dst, pitch, width, height, weight, world);
     } else {
         for (int y = 0; y < height * (int)scale; y++) {

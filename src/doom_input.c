@@ -18,7 +18,27 @@ static unsigned movement_updates, turns;
 static uint32_t blocked_buttons;
 static uint8_t blocked_keys[SDL_SCANCODE_COUNT];
 static int block_keys_next;
+static int queued_weapon = -1;
+static unsigned weapon_keys;
+static double menu_motion;
+static int menu_steps, menu_click, menu_release;
+static uint16_t menu_pad;
+static unsigned menu_until;
+static int jump_queued, jump_active, jump_key;
+static double jump_z,jump_velocity;
+static unsigned jump_field;
+static unsigned weapon_requests,weapon_selections;
 enum { kPlayerMovement = 0x81c1, kPlayerPointer = 0x18c, kPlayerAngle = 20 };
+enum { kPlayerArms = 0x1d9, kWeaponNext = 0x1e4 };
+enum { kPlayerFallCheck=0x81ac,kObjectGravity=0x92c8 };
+static int RamSigned(SuperFx *fx,unsigned address) {
+    return (int16_t)(superfx_ram_peek(fx,address)|(superfx_ram_peek(fx,address+1)<<8));
+}
+static void RemoveHooks(SuperFx *fx) {
+    superfx_set_pc_hook(fx,kPlayerMovement,NULL,NULL);
+    superfx_set_pc_hook(fx,kPlayerFallCheck,NULL,NULL);
+    superfx_set_pc_hook(fx,kObjectGravity,NULL,NULL);
+}
 
 static void ReadSettings(void) {
     char value[32];
@@ -55,7 +75,7 @@ static void CaptureMouse(SDL_Window *window) {
 }
 void DoomInputSuspended(int value) {
     suspended = value;
-    if (value) { CaptureMouse(NULL); yaw_counts = 0; released = 1; block_keys_next = 1; }
+    if (value) { CaptureMouse(NULL); yaw_counts = 0; queued_weapon = -1;jump_queued=0; menu_motion=0;menu_steps=menu_click=menu_release=0;menu_pad=0;menu_until=0; released = 1; block_keys_next = 1; }
 }
 void DoomInputReset(void) {
     yaw_counts = pitch = 0;
@@ -67,9 +87,14 @@ void DoomInputReset(void) {
     blocked_buttons = 0;
     memset(blocked_keys, 0, sizeof(blocked_keys));
     block_keys_next = 1;
+    queued_weapon = -1;weapon_keys = 0;
+    menu_motion=0;menu_steps=menu_click=menu_release=0;
+    menu_pad=0;menu_until=0;
+    jump_queued=jump_active=jump_key=0;jump_z=jump_velocity=0;jump_field=0;
+    weapon_requests=weapon_selections=0;
 }
 void DoomInputShutdown(void) {
-    if (hook_core) superfx_set_pc_hook(hook_core, kPlayerMovement, NULL, NULL);
+    if (hook_core) RemoveHooks(hook_core);
     hook_core = NULL;
     suspended = 0;
     DoomInputReset();
@@ -83,11 +108,40 @@ static void MouseTurn(SuperFx *fx, uint32_t pc, void *context) {
     last_movement = field;
     gameplay = 1;
     movement_updates++;
+    if(enabled && !suspended) {
+        /* Retail pjWEAPON is bit 0x40 in the native mover's R9 joystick.
+         * Legacy mode leaves this register and original cycling untouched. */
+        superfx_set_reg(fx,9,superfx_reg(fx,9)&~0x40u);
+        menu_motion=0;menu_steps=menu_click=menu_release=0;
+        menu_pad=0;
+    }
+    if (enabled && !suspended && queued_weapon >= 0) {
+        static const uint8_t types[7] = {0,2,4,8,10,12,14};
+        unsigned type = types[queued_weapon];
+        unsigned arms = superfx_ram_peek(fx, kPlayerArms);
+        if (!queued_weapon && (arms & 8)) type = 6;
+        /* Fists are always available. Native _RLP18000 notices WeaponNext
+         * and performs the normal lowering/raising transition. */
+        if (!type || (arms & (1u << (type / 2)))) {
+            fx->ram[kWeaponNext] = (uint8_t)type;
+            fx->ram[kWeaponNext + 1] = 0;
+            weapon_selections++;
+        }
+    }
+    queued_weapon = -1;
+    unsigned object=(unsigned)(uint16_t)RamSigned(fx,kPlayerPointer);
+    if(enabled && !suspended && jump_queued && !jump_active &&
+       object>=0x5a8e && object+38<=fx->ram_size) {
+        int z=RamSigned(fx,object+14),floor=RamSigned(fx,object+34);
+        int ceiling=RamSigned(fx,object+36);
+        if(z<=floor && ceiling-z>56) {
+            jump_active=1;jump_z=z;jump_velocity=280;jump_field=field-1;
+        }
+    }
+    jump_queued=0;
     double counts = yaw_counts;
     yaw_counts = 0;
     if (!enabled || suspended || !counts) return;
-    unsigned object = superfx_ram_peek(fx, kPlayerPointer) |
-        ((unsigned)superfx_ram_peek(fx, kPlayerPointer + 1) << 8);
     if (object < 0x5a8e || object + 38 > fx->ram_size) return;
     unsigned address = object + kPlayerAngle;
     uint16_t angle = superfx_ram_peek(fx, address) |
@@ -97,13 +151,36 @@ static void MouseTurn(SuperFx *fx, uint32_t pc, void *context) {
     fx->ram[address] = (uint8_t)angle;
     fx->ram[address + 1] = (uint8_t)(angle >> 8);
 }
+static void JumpAirMovement(SuperFx *fx,uint32_t pc,void *context) {
+    (void)pc;(void)context;
+    if(enabled && !suspended && jump_active)superfx_hook_redirect(fx,kPlayerMovement);
+}
+static void JumpGravity(SuperFx *fx,uint32_t pc,void *context) {
+    (void)pc;(void)context;
+    unsigned object=(unsigned)(uint16_t)RamSigned(fx,kPlayerPointer);
+    if(!enabled || suspended || !jump_active || superfx_reg(fx,12)!=object ||
+       object<0x5a8e || object+38>fx->ram_size)return;
+    int floor=(int16_t)superfx_reg(fx,2),z=(int16_t)superfx_reg(fx,1);
+    int top=RamSigned(fx,object+36)-56;
+    double dt=fmin(0.1,(field-jump_field)/60.0);jump_field=field;
+    jump_z+=jump_velocity*dt-0.5*1225*dt*dt;jump_velocity-=1225*dt;
+    if(jump_z>top) { jump_z=top;jump_velocity=fmin(0,jump_velocity); }
+    if(jump_z<=floor) { jump_z=floor;jump_active=0; }
+    /* Replace only the player's native gravity decrement. The original
+     * routine still clamps the floor and writes the real object height. */
+    superfx_set_reg(fx,6,(uint16_t)(z-(int)lround(jump_z)));
+}
 void DoomInputBeforeFrame(void) {
     ReadSettings();
     ++field;
+    if(!gameplay || suspended)jump_field=field;
+    if(hook_core && RamSigned(hook_core,0x2c)!=0)jump_active=jump_queued=0;
     /* The native pause/menu path stops calling the player mover. Discard
      * motion while it is stopped so resuming cannot unleash a queued turn. */
     if (gameplay && field - last_movement > 12) {
         gameplay = 0;
+        queued_weapon = -1;
+        jump_queued=0;
         CaptureMouse(NULL);
         yaw_counts = 0;
     }
@@ -111,16 +188,28 @@ void DoomInputBeforeFrame(void) {
     if (fx != hook_core) hook_core = NULL;
     static const uint8_t entry[] = {0x29,0x10,0xa1,0x20,0x71,0x09,0x07,0x01};
     static const uint8_t angle_load[] = {0xa0,0x14,0x3d,0xa1,0xc6,0x51,0x40,0x56,0x3f,0x71,0x90};
+    static const uint8_t fall_check[]={0xa0,0x22,0x3d,0xa2,0xc6,0x52,0x11,0x40};
+    static const uint8_t gravity[]={0xb1,0x66,0x3f,0x62,0x06,0x02,0x20,0xb2,0x90,0x9b,0x01};
     int supported = fx && fx->rom_size == 0x200000 && fx->ram_size >= 0x10000 &&
         !memcmp(fx->rom + 0x1c1, entry, sizeof(entry)) &&
-        !memcmp(fx->rom + 0x23b, angle_load, sizeof(angle_load));
+        !memcmp(fx->rom + 0x23b, angle_load, sizeof(angle_load)) &&
+        !memcmp(fx->rom+0x1ac,fall_check,sizeof(fall_check)) &&
+        !memcmp(fx->rom+0x12c8,gravity,sizeof(gravity));
     if (enabled && supported) {
-        if (!hook_core && superfx_set_pc_hook(fx, kPlayerMovement, MouseTurn, NULL)) hook_core = fx;
+        if (!hook_core) {
+            if(superfx_set_pc_hook(fx,kPlayerMovement,MouseTurn,NULL) &&
+               superfx_set_pc_hook(fx,kPlayerFallCheck,JumpAirMovement,NULL) &&
+               superfx_set_pc_hook(fx,kObjectGravity,JumpGravity,NULL))hook_core=fx;
+            else RemoveHooks(fx);
+        }
     } else {
-        if (hook_core) superfx_set_pc_hook(hook_core, kPlayerMovement, NULL, NULL);
+        if (hook_core) RemoveHooks(hook_core);
         hook_core = NULL;
         CaptureMouse(NULL);
         yaw_counts = pitch = 0;
+        queued_weapon = -1;
+        jump_queued=jump_active=0;
+        menu_motion=0;menu_steps=menu_click=menu_release=0;menu_pad=0;menu_until=0;
     }
     if (!look_enabled) pitch = 0;
 }
@@ -128,7 +217,7 @@ int DoomInputLookEnabled(void) { return look_enabled && hook_core != NULL; }
 double DoomInputPitch(void) { return DoomInputLookEnabled() ? pitch : 0; }
 void DoomInputGetStats(DoomInputStats *out) {
     *out = (DoomInputStats){movement_updates, turns, enabled,
-        gameplay, captured_window != NULL, DoomInputPitch()};
+        gameplay, captured_window != NULL, DoomInputPitch(),weapon_requests,weapon_selections,jump_active,suspended};
 }
 int DoomInputMotion(double x, double y) {
     if (!enabled || !gameplay || suspended || !isfinite(x) || !isfinite(y)) return 0;
@@ -136,12 +225,20 @@ int DoomInputMotion(double x, double y) {
     if (look_enabled) pitch = DoomMousePitch(pitch, y * sensitivity, invert_y);
     return 1;
 }
+int DoomInputRequestWeapon(unsigned slot) {
+    if(!enabled || !gameplay || suspended || slot>=7)return 0;
+    queued_weapon=(int)slot;weapon_requests++;return 1;
+}
+int DoomInputRequestJump(void) {
+    if(!enabled || !gameplay || suspended)return 0;
+    jump_queued=1;return 1;
+}
 
 uint16_t DoomInputKeyboard(const uint8_t *keys, unsigned player, uint16_t defaults) {
     ReadSettings();
     if (!enabled || player) return defaults;
     SDL_Window *focus = SDL_GetKeyboardFocus();
-    if (!focus || suspended) { CaptureMouse(NULL); return 0; }
+    if (!focus || suspended) { CaptureMouse(NULL); queued_weapon = -1; return 0; }
     if (!released && gameplay) CaptureMouse(focus);
     if (block_keys_next) {
         memcpy(blocked_keys, keys, sizeof(blocked_keys));
@@ -156,6 +253,15 @@ uint16_t DoomInputKeyboard(const uint8_t *keys, unsigned player, uint16_t defaul
     unsigned pressed = 0;
     int shortcut = keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_RCTRL] ||
                    keys[SDL_SCANCODE_LALT] || keys[SDL_SCANCODE_RALT];
+    unsigned numbers = 0;
+    for (unsigned slot = 0; slot < 7; slot++)
+        if (keys[SDL_SCANCODE_1 + slot]) numbers |= 1u << slot;
+    if (!shortcut && gameplay)
+        for (unsigned slot = 0; slot < 7; slot++)
+            if ((numbers & ~weapon_keys) & (1u << slot)) DoomInputRequestWeapon(slot);
+    weapon_keys = numbers;
+    if(!shortcut && gameplay && keys[SDL_SCANCODE_SPACE] && !jump_key)DoomInputRequestJump();
+    jump_key=keys[SDL_SCANCODE_SPACE];
     if (!shortcut) {
         if (keys[SDL_SCANCODE_W]) pressed |= DOOM_KEY_FORWARD;
         if (keys[SDL_SCANCODE_S]) pressed |= DOOM_KEY_BACK;
@@ -164,7 +270,6 @@ uint16_t DoomInputKeyboard(const uint8_t *keys, unsigned player, uint16_t defaul
         if (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]) pressed |= DOOM_KEY_RUN;
         if (keys[SDL_SCANCODE_E]) pressed |= DOOM_KEY_USE;
         if (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_KP_ENTER]) pressed |= DOOM_KEY_PAUSE;
-        if (keys[SDL_SCANCODE_SPACE]) pressed |= DOOM_KEY_WEAPON;
         if (keys[SDL_SCANCODE_TAB]) pressed |= DOOM_KEY_MAP;
         if (keys[SDL_SCANCODE_HOME]) pitch = 0;
     }
@@ -182,16 +287,45 @@ uint16_t DoomInputKeyboard(const uint8_t *keys, unsigned player, uint16_t defaul
     if (keys[SDL_SCANCODE_RIGHT]) pad |= 1u << 7;
     return pad;
 }
+uint16_t DoomInputAuxiliary(unsigned player,uint16_t pad) {
+    if(player || !enabled || suspended || !SDL_GetKeyboardFocus())return pad;
+    if(gameplay)return pad & ~(1u<<9);
+    /* Hold/release for actual simulated fields, not presentation polls;
+     * otherwise a high host refresh rate can lose native menu key edges. */
+    if(menu_pad) {
+        if(field<menu_until)return pad|menu_pad;
+        menu_pad=0;menu_release=1;menu_until=field+2;return pad;
+    }
+    if(menu_release) {
+        if(field<menu_until)return pad;
+        menu_release=0;
+    }
+    if(menu_click) { menu_pad=1u<<8;menu_click=0; }
+    else if(menu_steps) {
+        menu_pad=menu_steps<0 ? 1u<<4 : 1u<<5;
+        menu_steps+=menu_steps<0 ? 1 : -1;
+    }
+    if(menu_pad)menu_until=field+2;
+    return pad|menu_pad;
+}
 int DoomInputEvent(const void *opaque) {
     const SDL_Event *event = opaque;
-    ReadSettings();
     if (!enabled) return 0;
 #if SNESRECOMP_SDL3
     int lost_focus = event->type == SDL_EVENT_WINDOW_FOCUS_LOST;
 #else
     int lost_focus = event->type == SDL_WINDOWEVENT && event->window.event == SDL_WINDOWEVENT_FOCUS_LOST;
 #endif
-    if (lost_focus) { CaptureMouse(NULL); yaw_counts = 0; released = 1; block_keys_next = 1; return 0; }
+    if (lost_focus) { CaptureMouse(NULL); yaw_counts = 0; queued_weapon = -1;jump_queued=0; menu_motion=0;menu_steps=menu_click=menu_release=0;menu_pad=0;menu_until=0; released = 1; block_keys_next = 1; return 0; }
+    if(event->type==SDL_MOUSEMOTION && !gameplay && !suspended && SDL_GetKeyboardFocus()) {
+        menu_motion+=event->motion.yrel;
+        int steps=(int)(menu_motion/24);
+        menu_motion-=steps*24;
+        menu_steps=(int)fmax(-8,fmin(8,menu_steps+steps));
+        return 1;
+    }
+    if(event->type==SDL_MOUSEBUTTONDOWN && event->button.button==SDL_BUTTON_LEFT &&
+       !gameplay && !suspended && SDL_GetKeyboardFocus()) { menu_click=1;return 1; }
     if (event->type == SDL_MOUSEMOTION && captured_window && !suspended) {
         DoomInputMotion(event->motion.xrel, event->motion.yrel);
         return 1;
@@ -207,9 +341,16 @@ int DoomInputEvent(const void *opaque) {
     if (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) {
         int key = SNESRECOMP_SDL_EVENT_KEY(*event);
         int mod = SNESRECOMP_SDL_EVENT_MOD(*event);
+        if(event->type==SDL_KEYDOWN && !event->key.repeat && gameplay && !suspended &&
+           !(mod&(KMOD_CTRL|KMOD_ALT)) && key>=SDLK_1 && key<=SDLK_7)
+            DoomInputRequestWeapon((unsigned)(key-SDLK_1));
+        if(event->type==SDL_KEYDOWN && !event->key.repeat && key==SDLK_SPACE &&
+           gameplay && !suspended && !(mod&(KMOD_CTRL|KMOD_ALT)))DoomInputRequestJump();
         if (event->type == SDL_KEYDOWN && (key == SDLK_RETURN || key == SDLK_KP_ENTER) &&
             !(mod & (KMOD_CTRL|KMOD_ALT))) {
             CaptureMouse(NULL); yaw_counts = 0; released = 1;
+            queued_weapon = -1;
+            jump_queued = 0;
         }
         if (key == SDLK_ESCAPE && captured_window) {
             CaptureMouse(NULL); released = 1; return 1;
@@ -218,7 +359,7 @@ int DoomInputEvent(const void *opaque) {
             (key == SDLK_w || key == SDLK_s || key == SDLK_a || key == SDLK_d ||
              key == SDLK_e || key == SDLK_RETURN || key == SDLK_KP_ENTER ||
              key == SDLK_LSHIFT || key == SDLK_RSHIFT || key == SDLK_SPACE ||
-             key == SDLK_TAB || key == SDLK_HOME)) return 1;
+             key == SDLK_TAB || key == SDLK_HOME || (key >= SDLK_1 && key <= SDLK_7))) return 1;
     }
     return 0;
 }

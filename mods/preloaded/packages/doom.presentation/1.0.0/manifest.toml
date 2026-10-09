@@ -136,7 +136,7 @@ label = "4x (864 x 576 at 4:3)"
 [[feature]]
 id = "modern-controls"
 name = "Modern keyboard + mouse"
-description = "W/S move, A/D strafe, Shift runs, E uses doors/switches, Enter pauses. Left mouse fires; mouse turns and shifts the horizon for classic vertical look. Escape releases the cursor; click to capture it again."
+description = "W/S move, A/D strafe, Shift runs, Space jumps, E uses doors/switches, Enter pauses. Number keys 1-7 select owned weapons. Left mouse fires; mouse turns and shifts the horizon for classic vertical look. In menus, move the mouse up/down and click to confirm. Escape releases the cursor."
 group = "Controls"
 default_enabled = false
 presentation_only = false

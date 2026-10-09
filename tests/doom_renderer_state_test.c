@@ -331,6 +331,60 @@ int main(int argc, char **argv)
     CHECK(DoomRendererDrawWeapon(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0, true));
     CHECK(output[(edge - 10) * 342 + 43 + 116] == 0xffffff00);
     CHECK(output[(edge - 10) * 342 + 43 + 100] == 0xff204080);
+    /* Low-resolution look preserves every native object pixel, including
+     * duplicated columns and transparent holes, by translating whole rows.
+     * A distinctive pattern detects any reconstructed scaling or filtering. */
+    s.widescreen = false;s.cached = true;s.map_width = 0;
+    memset(s.resolution_scenes, 0, sizeof(s.resolution_scenes));
+    s.resolution_scenes[0].count = 1;
+    for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
+        s.visible_rows[y] = true;
+        for (unsigned color = 0; color < 256; color++)
+            s.palettes[y][color] = 0xff000000u | color;
+        for (unsigned x = 0; x < DOOM_VIEW_WIDTH; x++)
+            s.pictures[0][y * DOOM_VIEW_WIDTH + x] = (uint8_t)(y * 7 + x / 2);
+    }
+    for (int shift = -20; shift <= 20; shift += 20) {
+        s.horizon_offset = shift;
+        CHECK(DoomRendererDrawResolution((uint8_t *)output,342 * 4,342,1));
+        for (unsigned y = 20; y < 124; y++)
+            for (unsigned x = 0; x < DOOM_VIEW_WIDTH; x++)
+                CHECK(output[(y + kNativeViewY) * 342 + 63 + x] ==
+                    (0xff000000u | (uint8_t)(((int)y - shift) * 7 + x / 2)));
+    }
+    /* A close, flat wall spans both former viewport borders. Its floor edge
+     * must land on the same row using all three native visibility cameras.
+     * Side pixels have the same paired-column density as the centre. */
+    s.widescreen = true;s.horizon_offset = 0;s.map_width = 0;
+    memset(s.object_pixels, 0, sizeof(s.object_pixels));
+    for (unsigned view = 0; view < 3; view++) {
+        DoomResolutionScene *scene = &s.resolution_scenes[view];
+        memset(scene, 0, sizeof(*scene));scene->count = 1;scene->view_z = 32;
+        WriteWord(scene->sectors, 2, 0);WriteWord(scene->sectors, 4, 64);
+        scene->sectors[8] = 200;scene->sectors[9] = 200;
+        double yaw = view == 1 ? -DOOM_SIDE_YAW : view == 2 ? DOOM_SIDE_YAW : 0;
+        scene->segments[0] = (DoomResolutionSegment){
+            .x1=-1000*cos(yaw)-128*sin(yaw),.z1=128*cos(yaw)-1000*sin(yaw),
+            .x2=1000*cos(yaw)-128*sin(yaw),.z2=128*cos(yaw)+1000*sin(yaw),
+            .flags=1,.near_sector=0,.far_sector=UINT16_MAX};
+    }
+    for (unsigned i = 0; i < 342*224; i++) output[i] = 0xffabcdef;
+    /* Exclude wall-image tables so the wall band retains the sentinel;
+     * the real colormap allocation remains available for plane rendering. */
+    size_t saved_rom_size = s.snapshot.rom_size;
+    s.snapshot.rom_size = 0x1b0000;
+    s.object_pixels[0][100 * DOOM_VIEW_WIDTH + 108] = 1;
+    CHECK(DoomRendererDrawResolution((uint8_t *)output,342 * 4,342,1));
+    for (unsigned x = 20; x < 322; x++) {
+        CHECK(output[(104 + kNativeViewY) * 342 + x] != 0xffabcdef);
+        CHECK(output[(102 + kNativeViewY) * 342 + x] == 0xffabcdef);
+    }
+    for (unsigned x = 20; x < 322; x += 2)
+        CHECK(output[(120 + kNativeViewY) * 342 + x] ==
+              output[(120 + kNativeViewY) * 342 + x + 1]);
+    CHECK(output[(100 + kNativeViewY) * 342 + 171] ==
+          (0xff000000u | s.pictures[0][100 * DOOM_VIEW_WIDTH + 108]));
+    s.snapshot.rom_size = saved_rom_size;
     free(ppu->renderBuffer);
     ppu->renderBuffer = NULL;
 

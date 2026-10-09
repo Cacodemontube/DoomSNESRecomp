@@ -18,6 +18,7 @@ static unsigned frame;
 static unsigned p1, p2, invisibility_ticks;
 static int requested_invisibility_ticks = -1;
 static int requested_motion, motion_x, motion_y;
+static int requested_key;
 static DoomInputStats input_stats;
 static unsigned long long draws;
 static double draw_total_ms, draw_max_ms;
@@ -37,8 +38,13 @@ void DoomDebugRecordFrame(unsigned number) {
     requested_invisibility_ticks = -1;
     int mouse_request = requested_motion, dx = motion_x, dy = motion_y;
     requested_motion = 0;
+    int key_request=requested_key;requested_key=0;
     UNLOCK();
     if (mouse_request) DoomInputMotion(dx, dy);
+    if(key_request) {
+        if(key_request==SDLK_SPACE)DoomInputRequestJump();
+        else DoomInputRequestWeapon((unsigned)(key_request-SDLK_1));
+    }
     SuperFx *fx = g_snes && g_snes->cart ? g_snes->cart->superfx : NULL;
     if (request >= 0 && fx && fx->ram && fx->ram_size > 0x1eb &&
         g_snes->ram && (g_snes->ram[0x2c] & 0x40)) {
@@ -73,6 +79,15 @@ void DoomDebugRecordDraw(double milliseconds) {
 }
 
 static int Command(const char *cmd, const char *args, DebugServerGameSendLine send) {
+    if(!strcmp(cmd,"modern_key_test")) {
+        int key=!strcmp(args,"space") ? SDLK_SPACE :
+            strlen(args)==1 && args[0]>='1' && args[0]<='7' ? args[0] : 0;
+        LOCK();int ready=input_stats.enabled && input_stats.gameplay;
+        if(key && ready)requested_key=key;UNLOCK();
+        send(key && ready ? "{\"ok\":true,\"queued\":true}" :
+            "{\"ok\":false,\"error\":\"usage during modern gameplay: modern_key_test <space|1..7>\"}");
+        return 1;
+    }
     if (!strcmp(cmd, "mouse_motion_test")) {
         int dx, dy; char extra;
         if (sscanf(args, "%d %d %c", &dx, &dy, &extra) != 2 ||
@@ -93,10 +108,12 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         LOCK();
         snprintf(json, sizeof(json),
             "{\"ok\":true,\"frame\":%u,\"enabled\":%s,\"gameplay\":%s,\"captured\":%s,"
-            "\"movement_updates\":%u,\"mouse_turns\":%u,\"horizon_offset\":%.3f}",
+            "\"movement_updates\":%u,\"mouse_turns\":%u,\"horizon_offset\":%.3f,"
+            "\"weapon_requests\":%u,\"weapon_selections\":%u,\"jumping\":%s,\"suspended\":%s}",
             frame, input_stats.enabled ? "true" : "false", input_stats.gameplay ? "true" : "false",
             input_stats.captured ? "true" : "false", input_stats.movement_updates,
-            input_stats.turns, input_stats.pitch);
+            input_stats.turns, input_stats.pitch,input_stats.weapon_requests,input_stats.weapon_selections,
+            input_stats.jumping ? "true" : "false",input_stats.suspended ? "true" : "false");
         UNLOCK(); send(json); return 1;
     }
     if (!strcmp(cmd, "weapon_invisibility_test")) {

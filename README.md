@@ -41,16 +41,25 @@ The option is off by default. Set player 1's input source to **Keyboard**.
 | Shift | Run |
 | E | Open doors and use switches |
 | Enter | Pause / resume the game |
+| Space | Jump |
 | Mouse left / right | Turn, including while strafing |
 | Mouse up / down | Classic vertical look |
 | Left click | Fire |
 | Right click | Use |
-| Space | Cycle weapon |
+| 1 | Fist, or chainsaw if picked up |
+| 2 | Pistol |
+| 3 | Shotgun if picked up |
+| 4 | Chaingun if picked up |
+| 5 | Rocket launcher if picked up |
+| 6 | Plasma rifle if picked up |
+| 7 | BFG 9000 if picked up |
 | Tab | Automap |
 | Home | Center the view |
 | Escape | Release the mouse; click to capture again |
 
-Arrow keys navigate the original menus; E confirms. Ctrl+L opens the launcher.
+Move the mouse up/down to navigate the original menus; left-click confirms.
+Arrow keys and E also work. Ctrl+L opens the launcher. Legacy controls retain
+the original SNES weapon cycling; modern controls use the number keys.
 Sensitivity, invert-Y and the vertical-look toggle are in the same feature.
 Mouse capture releases when focus is lost or a host panel opens.
 

@@ -24,6 +24,26 @@ int main(void) {
     word(ram+0x4004,192);word(ram+0x4006,96);
     CHECK(DoomResolutionCapture(scene,ram,0x10000,0,rom,0x200000));
     CHECK(scene->count==1 && scene->segments[0].x1==-96);
+    CHECK(scene->segments[0].z1==132 && scene->segments[0].z2==196);
+    /* Native vertex cache depths are relative to the four-unit screen
+     * plane. Recover a close flat wall identically in all three cameras;
+     * omitting the offset changes side depth after reprojection. */
+    for(unsigned view=0;view<3;view++) {
+        double yaw=view==1 ? -DOOM_SIDE_YAW : view==2 ? DOOM_SIDE_YAW : 0;
+        double common_x=view==1 ? -24 : view==2 ? 24 : 0;
+        double common_z=32;
+        double x=common_x*cos(yaw)-common_z*sin(yaw);
+        double z=common_z*cos(yaw)+common_x*sin(yaw);
+        word(ram+0x4000,(unsigned)(int)lround(z-16*sin(yaw)-4));
+        word(ram+0x4002,(unsigned)(int)lround(x-16*cos(yaw)));
+        word(ram+0x4004,(unsigned)(int)lround(z+16*sin(yaw)-4));
+        word(ram+0x4006,(unsigned)(int)lround(x+16*cos(yaw)));
+        CHECK(DoomResolutionCapture(scene,ram,0x10000,0,rom,0x200000));
+        CHECK(fabs(scene->segments[0].z1-(z-16*sin(yaw)))<=0.5);
+        DoomResolutionHit close_hits[DOOM_RES_SEGMENTS];
+        CHECK(DoomResolutionHits(scene,x/z,z/common_z,close_hits)==1);
+        CHECK(fabs(close_hits[0].depth-common_z)<1.0);
+    }
     word(ram+0xd6,0x7181);
     CHECK(!DoomResolutionCapture(scene,ram,0x10000,0,rom,0x200000));
     scene->count=1;
@@ -83,6 +103,42 @@ int main(void) {
     DoomResolutionWall(scene,rom,0x200000,seg,0,(85.0-108)/DOOM_FOCAL,
         128,64,10,142,144,2,(uint8_t*)out,512*4,palette,visible,NULL);
     CHECK(out[(142+46)*512+10]==(0xff000000u|73u));
+    /* Camera joins must not change the texture phase of a wall. Supply
+     * deliberately different quantized native samples, then project the
+     * same ray through the centre and both yawed visibility cameras. */
+    scene->continuous_uv=true;
+    DoomResolutionSegment door={.perpendicular=128};
+    CHECK(fabs(DoomResolutionWallCoordinate(&door,0))<1e-9);
+    /* A 128-world-unit door spans one 64-column image, not two repeats. */
+    CHECK(fabs(DoomResolutionWallCoordinate(&door,1)-64)<1e-9);
+    const double common_ray=108.25/DOOM_FOCAL;
+    DoomResolutionSegment original=*seg;
+    for(unsigned view=0;view<3;view++) {
+        double yaw=view==1 ? -DOOM_SIDE_YAW : view==2 ? DOOM_SIDE_YAW : 0;
+        double sx,sy;DoomProjectRay(common_ray*DOOM_FOCAL,0,yaw,&sx,&sy);
+        *seg=original;seg->angle=(int16_t)(view==1 ? -0x2000 : view==2 ? 0x2000 : 0);
+        for(unsigned i=0;i<108;i++)
+            seg->uv[0][i]=(DoomResolutionUv){.u=(uint8_t)(view*5),
+                .v=(float)(view*31),.step=1,.y=71,.valid=true};
+        DoomResolutionWall(scene,rom,0x200000,seg,0,(sx-108)/DOOM_FOCAL,
+            160,64,20+view,120,160,2,(uint8_t*)out,512*4,palette,visible,NULL);
+    }
+    for(unsigned y=120;y<160;y++) {
+        CHECK(out[(y+46)*512+20]==out[(y+46)*512+21]);
+        CHECK(out[(y+46)*512+20]==out[(y+46)*512+22]);
+        CHECK(out[(y+46)*512+20]!=0);
+    }
+    *seg=original;scene->continuous_uv=false;
+    double native_phase_u,native_phase_v;
+    CHECK(DoomResolutionWallPhase(seg,0,&native_phase_u,&native_phase_v));
+    CHECK(fabs(DoomResolutionWallCoordinate(seg,(86.0-108)/DOOM_FOCAL)+native_phase_u-11)<1e-9);
+    /* Re-capturing a moving door's native texture phase must follow its
+     * changed ceiling rather than leaving the artwork fixed in world Z. */
+    double closed_phase=native_phase_v;
+    seg->uv[0][43].v+=16;
+    CHECK(DoomResolutionWallPhase(seg,0,&native_phase_u,&native_phase_v));
+    CHECK(fabs(native_phase_v-closed_phase-16)<1e-9);
+    *seg=original;
     seg->uv[0][42].v=130;seg->uv[0][43].v=2;
     DoomResolutionWall(scene,rom,0x200000,seg,0,(85.0-108)/DOOM_FOCAL,
         128,64,10,142,144,2,(uint8_t*)out,512*4,palette,visible,NULL);

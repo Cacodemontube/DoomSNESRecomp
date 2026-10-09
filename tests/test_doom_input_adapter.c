@@ -53,6 +53,9 @@ int main(void) {
     const uint8_t entry[]={0x29,0x10,0xa1,0x20,0x71,0x09,0x07,0x01};
     const uint8_t load[]={0xa0,0x14,0x3d,0xa1,0xc6,0x51,0x40,0x56,0x3f,0x71,0x90};
     memcpy(rom+0x1c1,entry,sizeof(entry));memcpy(rom+0x23b,load,sizeof(load));
+    const uint8_t fall[]={0xa0,0x22,0x3d,0xa2,0xc6,0x52,0x11,0x40};
+    const uint8_t gravity[]={0xb1,0x66,0x3f,0x62,0x06,0x02,0x20,0xb2,0x90,0x9b,0x01};
+    memcpy(rom+0x1ac,fall,sizeof(fall));memcpy(rom+0x12c8,gravity,sizeof(gravity));
     SuperFx *fx=superfx_create(rom,0x200000,ram,0x10000);CHECK(fx);
     Snes machine={0};Cart cart={0};machine.cart=&cart;cart.superfx=fx;g_snes=&machine;
     ram[0x18c]=0x8e;ram[0x18d]=0x5a;
@@ -60,11 +63,69 @@ int main(void) {
     keys[SDL_SCANCODE_W]=keys[SDL_SCANCODE_A]=keys[SDL_SCANCODE_LSHIFT]=1;
     CHECK(DoomInputKeyboard(keys,0,0x123)==0x123);
     DoomInputBeforeFrame();CHECK(!fx->pc_hook_count);
-    selected=1;DoomInputBeforeFrame();CHECK(fx->pc_hook_count==1);
+    selected=1;DoomInputBeforeFrame();CHECK(fx->pc_hook_count==3);
+    SDL_Event menu={0};menu.type=SDL_MOUSEMOTION;menu.motion.yrel=48;
+    CHECK(DoomInputEvent(&menu));
+    CHECK(DoomInputAuxiliary(0,0)==(1u<<5));CHECK(DoomInputAuxiliary(0,0)==(1u<<5));
+    field+=2;CHECK(DoomInputAuxiliary(0,0)==0);field+=2;
+    CHECK(DoomInputAuxiliary(0,0)==(1u<<5));field+=2;CHECK(DoomInputAuxiliary(0,0)==0);field+=2;
+    menu.motion.yrel=-24;DoomInputEvent(&menu);
+    CHECK(DoomInputAuxiliary(0,0)==(1u<<4));field+=2;CHECK(DoomInputAuxiliary(0,0)==0);field+=2;
+    menu.type=SDL_MOUSEBUTTONDOWN;menu.button.button=SDL_BUTTON_LEFT;DoomInputEvent(&menu);
+    CHECK(DoomInputAuxiliary(0,0)==(1u<<8));field+=2;CHECK(DoomInputAuxiliary(0,0)==0);field+=2;
     CHECK(DoomInputKeyboard(keys,0,0)==0x411);
     CHECK(DoomInputKeyboard(keys,1,0x123)==0x123);
     Move(fx);CHECK(gameplay);
     CHECK(DoomInputKeyboard(keys,0,0)==0x411);CHECK(captures==1);
+    uint8_t number_keys[SDL_SCANCODE_COUNT]={0};
+    const uint8_t expected_weapons[]={0,2,4,8,10,12,14};
+    for(unsigned slot=0;slot<7;slot++) {
+        memset(number_keys,0,sizeof(number_keys));DoomInputKeyboard(number_keys,0,0);
+        ram[kPlayerArms]=0;ram[kWeaponNext]=2;
+        number_keys[SDL_SCANCODE_1+slot]=1;
+        DoomInputKeyboard(number_keys,0,0);Move(fx);
+        CHECK(ram[kWeaponNext]==(slot ? 2 : 0)); /* unavailable weapons ignored */
+        number_keys[SDL_SCANCODE_1+slot]=0;DoomInputKeyboard(number_keys,0,0);
+        ram[kPlayerArms]=(uint8_t)(1u<<(expected_weapons[slot]/2));
+        number_keys[SDL_SCANCODE_1+slot]=1;
+        DoomInputKeyboard(number_keys,0,0);Move(fx);
+        CHECK(ram[kWeaponNext]==expected_weapons[slot] && !ram[kWeaponNext+1]);
+        ram[kWeaponNext]=2;DoomInputKeyboard(number_keys,0,0);Move(fx);
+        CHECK(ram[kWeaponNext]==2); /* a held key never restarts the switch */
+    }
+    memset(number_keys,0,sizeof(number_keys));DoomInputKeyboard(number_keys,0,0);
+    ram[kPlayerArms]=8;number_keys[SDL_SCANCODE_1]=1;
+    DoomInputKeyboard(number_keys,0,0);Move(fx);CHECK(ram[kWeaponNext]==6);
+    memset(number_keys,0,sizeof(number_keys));DoomInputKeyboard(number_keys,0,0);
+    number_keys[SDL_SCANCODE_1]=number_keys[SDL_SCANCODE_LCTRL]=1;
+    ram[kWeaponNext]=2;DoomInputKeyboard(number_keys,0,0);Move(fx);
+    CHECK(ram[kWeaponNext]==2);
+    DoomInputKeyboard(keys,0,0);
+    CHECK(DoomInputAuxiliary(0,0x210)==0x10); /* modern cycle suppressed */
+    uint8_t jumping[SDL_SCANCODE_COUNT]={0};jumping[SDL_SCANCODE_SPACE]=1;
+    ram[0x5a8e + 36]=128;ram[0x5a8e + 37]=0;
+    CHECK(!(DoomInputKeyboard(jumping,0,0)&(1u<<9)));Move(fx);CHECK(jump_active);
+    int peak=0;
+    for(unsigned tick=0;tick<60 && jump_active;tick++) {
+        DoomInputBeforeFrame();Move(fx);
+        superfx_set_reg(fx,12,0x5a8e);superfx_set_reg(fx,1,ram[0x5a8e + 14]);superfx_set_reg(fx,2,0);
+        JumpGravity(fx,kObjectGravity,NULL);
+        int z=(int16_t)superfx_reg(fx,1)-(int16_t)superfx_reg(fx,6);
+        CHECK(z>=0);if(z>peak)peak=z;ram[0x5a8e + 14]=(uint8_t)z;
+        DoomInputKeyboard(jumping,0,0);CHECK(!jump_queued);
+    }
+    CHECK(!jump_active && peak>=30 && peak<=33 && ram[0x5a8e + 14]==0);
+    jumping[SDL_SCANCODE_SPACE]=0;DoomInputKeyboard(jumping,0,0);
+    ram[0x5a8e + 36]=64;jumping[SDL_SCANCODE_SPACE]=1;
+    DoomInputKeyboard(jumping,0,0);Move(fx);CHECK(jump_active);
+    for(unsigned tick=0;tick<60 && jump_active;tick++) {
+        DoomInputBeforeFrame();Move(fx);
+        superfx_set_reg(fx,12,0x5a8e);superfx_set_reg(fx,1,ram[0x5a8e + 14]);superfx_set_reg(fx,2,0);
+        JumpGravity(fx,kObjectGravity,NULL);
+        int z=(int16_t)superfx_reg(fx,1)-(int16_t)superfx_reg(fx,6);
+        CHECK(z>=0 && z<=8);ram[0x5a8e + 14]=(uint8_t)z;
+    }
+    CHECK(!jump_active && !ram[0x5a8e + 14]);DoomInputKeyboard(keys,0,0);
     SDL_Event event={0};event.type=SDL_MOUSEMOTION;event.motion.xrel=10;event.motion.yrel=-40;
     CHECK(DoomInputEvent(&event));CHECK(DoomInputPitch()==10);
     Move(fx);CHECK((ram[0x5aa2]|(ram[0x5aa3]<<8))==0xfd80);CHECK(yaw_counts==0);
@@ -105,12 +166,13 @@ int main(void) {
     event.type=SDL_WINDOWEVENT;event.window.event=SDL_WINDOWEVENT_FOCUS_LOST;
 #endif
     DoomInputEvent(&event);CHECK(!captured_window);
-    invert="on";event.type=SDL_MOUSEBUTTONDOWN;event.button.button=SDL_BUTTON_LEFT;DoomInputEvent(&event);
+    invert="on";DoomInputBeforeFrame();event.type=SDL_MOUSEBUTTONDOWN;event.button.button=SDL_BUTTON_LEFT;DoomInputEvent(&event);
     event.type=SDL_MOUSEMOTION;event.motion.xrel=0;event.motion.yrel=-40;DoomInputEvent(&event);
     CHECK(DoomInputPitch()==0);
     look="off";DoomInputBeforeFrame();CHECK(!DoomInputLookEnabled()&&DoomInputPitch()==0);
     for(unsigned i=0;i<13;i++)DoomInputBeforeFrame();CHECK(!captured_window&&yaw_counts==0);
     selected=0;DoomInputBeforeFrame();CHECK(!fx->pc_hook_count);
+    CHECK(DoomInputAuxiliary(0,0x210)==0x210); /* controller cycling unchanged */
     CHECK(DoomInputKeyboard(keys,0,0x123)==0x123);
     selected=1;rom[0x1c1]^=1;DoomInputBeforeFrame();CHECK(!fx->pc_hook_count);
     DoomInputSuspended(1);DoomInputReset();CHECK(suspended);

@@ -74,6 +74,7 @@ typedef struct RenderJob {
     int yaw;
     uint8_t *picture, *ram;
     uint16_t *floors;
+    uint8_t *objects;
     uint8_t *floor_used;
     DoomResolutionScene *resolution_scene;
     unsigned third;
@@ -106,6 +107,7 @@ typedef struct RenderState {
     double horizon_offset;
     DoomResolutionScene resolution_scenes[3];
     uint8_t pictures[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
+    uint8_t object_pixels[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
     /* Sector texture pointers identify solid floors/ceilings; the two sky
      * sentinels identify the original panorama chosen by the private GSU. */
     uint16_t floors[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
@@ -464,10 +466,12 @@ static void MaskObjectPixel(SuperFx *fx, uint32_t pc, void *context)
     if (x >= 72 || y >= DOOM_VIEW_HEIGHT || job->third >= 3) return;
     const unsigned offset = y * DOOM_VIEW_WIDTH + job->third * 72 + x;
     job->floors[offset] = 0;
+    if (job->objects) job->objects[offset] = 1;
     /* The second PLOT is the conditional branch's delay-slot instruction,
      * so it executes even for the final pixel in the object strip. */
     if (x + 1 < 72) {
         job->floors[offset + 1] = 0;
+        if (job->objects) job->objects[offset + 1] = 1;
     }
 }
 
@@ -686,13 +690,15 @@ static void ExecuteRenderJob(RenderJob *job)
     const Camera camera = job->camera;
     const double fraction = job->fraction;
     const int yaw = job->yaw;
-    if (s.resolution_scale > 1 || s.look_enabled) {
+    if (s.resolution_scale > 1 || s.look_enabled || s.widescreen) {
         unsigned view = job->picture == s.pictures[0] ? 0 :
                         job->picture == s.pictures[1] ? 1 : 2;
         job->resolution_scene = &s.resolution_scenes[view];
         job->resolution_scene->count = 0;
         job->floors = s.floors[view];
         job->floor_used = s.floor_used[view];
+        job->objects = s.object_pixels[view];
+        memset(job->objects, 0, DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT);
     }
     SuperFx source = s.snapshot, result;
     if (job->floors) {
@@ -1163,6 +1169,8 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
             line[x] = s.palettes[y][color];
         }
     }
+    if (wide && s.resolution_scale <= 1)
+        DoomRendererDrawResolution(dst, pitch, width, 1);
     if (s.resolution_scale <= 1 && !s.look_enabled)
         DoomRendererDrawWeapon(ppu, dst, pitch, width, height, alpha, true);
     return true;
@@ -1304,8 +1312,33 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
         return false;
     unsigned x0 = wide ? 20 : (width - 256) / 2 + 20;
     unsigned x1 = wide ? width - 20 : x0 + 216;
-    for (unsigned x = x0 * scale; x < x1 * scale; x++) {
-        double rx = (x + 0.5) / scale - width / 2.0;
+    if (wide) {
+        /* Sector and vertex identity identify the same native wall in all
+         * visibility cameras. Prefer the central camera's texture anchor
+         * and share it at both joins, including the current door position. */
+        for (unsigned view=0;view<3;view++)
+        for (unsigned i=0;i<s.resolution_scenes[view].count;i++) {
+            DoomResolutionSegment *seg=&s.resolution_scenes[view].segments[i];
+            for(unsigned component=0;component<2;component++) {
+                seg->phase_valid[component]=false;
+                for(unsigned ref=0;ref<3 && !seg->phase_valid[component];ref++)
+                for(unsigned j=0;j<s.resolution_scenes[ref].count;j++) {
+                    const DoomResolutionSegment *other=&s.resolution_scenes[ref].segments[j];
+                    if(seg->near_sector!=other->near_sector || seg->vertex[0]!=other->vertex[0] ||
+                       seg->vertex[1]!=other->vertex[1] || seg->texture[component]!=other->texture[component])continue;
+                    if(DoomResolutionWallPhase(other,component,&seg->phase_u[component],&seg->phase_v[component])) {
+                        seg->phase_valid[component]=true;break;
+                    }
+                }
+            }
+        }
+    }
+    /* Original low detail draws pairs of columns. Sample a common flat
+     * camera at that same density across the complete widescreen view,
+     * rather than magnifying the side cameras' framebuffer pixels. */
+    unsigned columns = scale == 1 && wide ? 2 : 1;
+    for (unsigned x = x0 * scale; x < x1 * scale; x += columns) {
+        double rx = (x + columns * 0.5) / scale - width / 2.0;
         unsigned view = 0;
         double yaw = 0;
         if (rx < -108 || rx >= 108) {
@@ -1318,13 +1351,43 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
         DoomResolutionScene *scene = &s.resolution_scenes[view];
         if (!scene->count) return false;
         scene->horizon_offset = s.horizon_offset;
+        scene->continuous_uv = wide;
         double depths[144 * 4];
         DoomResolutionRasterColumn(scene, s.snapshot.rom, s.snapshot.rom_size,
             s.cached_camera.angle, rx, (sx - 108) / DOOM_FOCAL, ratio,
             x, scale, dst, pitch, s.palettes, s.visible_rows, depths);
-        DoomResolutionSprites(scene, s.snapshot.rom, s.snapshot.rom_size,
-            (sx - 108) / DOOM_FOCAL, ratio, x, scale, dst, pitch,
-            s.palettes, s.visible_rows, depths);
+        if (scale > 1 || (wide && view != 0))
+            DoomResolutionSprites(scene, s.snapshot.rom, s.snapshot.rom_size,
+                (sx - 108) / DOOM_FOCAL, ratio, x, scale, dst, pitch,
+                s.palettes, s.visible_rows, depths);
+        if (columns == 2 && x + 1 < x1)
+            for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
+                if (!s.visible_rows[y]) continue;
+                uint32_t *line = (uint32_t *)(dst + (y + kNativeViewY) * pitch);
+                line[x + 1] = line[x];
+            }
+    }
+    if (scale == 1) {
+        /* Low-resolution mouse look translates the native Super FX image.
+         * Keep its object size, rounding, column duplication and transparent
+         * texels instead of reconstructing billboards with continuous math.
+         * The raster above supplies only the newly exposed edge rows. */
+        BuildProjectionMap(width, wide, x0, x1);
+        int shift = (int)lround(s.horizon_offset);
+        for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
+            int source_y = (int)y - shift;
+            if (!s.visible_rows[y] || source_y < 0 || source_y >= (int)DOOM_VIEW_HEIGHT)
+                continue;
+            uint32_t *line = (uint32_t *)(dst + (y + kNativeViewY) * pitch);
+            for (unsigned x = x0; x < x1; x++) {
+                unsigned picture = s.map_picture[x];
+                unsigned offset = s.map_y[source_y][x] * DOOM_VIEW_WIDTH + s.map_x[x];
+                /* In widescreen, retain only original central sprite pixels.
+                 * World geometry and side sprites use the common projection. */
+                if (wide && (picture != 0 || !s.object_pixels[0][offset])) continue;
+                line[x] = s.palettes[y][s.pictures[picture][offset]];
+            }
+        }
     }
     return true;
 }

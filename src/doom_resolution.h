@@ -12,6 +12,7 @@
 /* Retail USA layout, checked before use. These are private BUILD outputs,
  * not framebuffer pixels. Source: DOOM-FX rle.i and rltracew4/5.a. */
 enum { DOOM_RES_SEGMENTS = 168, DOOM_RES_SEGMENT_SIZE = 62 };
+enum { DOOM_RES_SCREEN_PLANE = 4 };
 /* Native RL->SCN tables use 128/depth vertically; the horizontal focal
  * length includes the 1.25 SNES aspect correction. Pixel centres put native
  * row 71 at 71.5 in the continuous projection. All world surfaces and
@@ -34,6 +35,9 @@ typedef struct DoomResolutionSegment {
     uint16_t flags, near_sector, far_sector, texture[2];
     uint8_t texture_h[2], texture_w[2], offset_x, offset_y;
     int16_t angle, perpendicular, texture_offset;
+    uint16_t vertex[2];
+    double phase_u[2], phase_v[2];
+    bool phase_valid[2];
     DoomResolutionUv uv[2][108];
 } DoomResolutionSegment;
 typedef struct DoomResolutionColumn {
@@ -50,7 +54,7 @@ typedef struct DoomResolutionScene {
     int view_z;
     double horizon_offset; /* Build-style vertical shear, in native world rows. */
     unsigned light_adjust;
-    bool invulnerable, sky2;
+    bool invulnerable, sky2, continuous_uv;
     DoomResolutionColumn columns[256];
 } DoomResolutionScene;
 static inline unsigned DoomResolutionWord(const uint8_t *p) {
@@ -86,10 +90,14 @@ static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
             (near_sector - 0x3080) % 14) return false;
         DoomResolutionSegment *seg = &scene->segments[count++];
         *seg = (DoomResolutionSegment){0};
+        seg->vertex[0]=(uint16_t)v1;seg->vertex[1]=(uint16_t)v2;
         seg->x1 = DoomResolutionSigned(ram + v1 + 2);
-        seg->z1 = DoomResolutionSigned(ram + v1);
+        /* RLSEGS2 caches Y relative to RLScreenPlane, not the eye. RLSEGS3
+         * adds the plane distance back before projecting. Restore it here
+         * before intersecting rays or converting side-camera depths. */
+        seg->z1 = DoomResolutionSigned(ram + v1) + DOOM_RES_SCREEN_PLANE;
         seg->x2 = DoomResolutionSigned(ram + v2 + 2);
-        seg->z2 = DoomResolutionSigned(ram + v2);
+        seg->z2 = DoomResolutionSigned(ram + v2) + DOOM_RES_SCREEN_PLANE;
         seg->flags = DoomResolutionWord(p + 4);
         seg->near_sector = (near_sector - 0x3080) / 14;
         unsigned far_sector = DoomResolutionWord(p + 30);
@@ -208,13 +216,34 @@ static inline void DoomResolutionPlane(DoomResolutionScene *scene,
         if (depths) depths[y] = plane_depth;
     }
 }
+static inline double DoomResolutionWallCoordinate(const DoomResolutionSegment *seg,
+    double source_ray) {
+    double theta = -atan(source_ray) - seg->angle * (2 * 3.14159265358979323846 / 65536);
+    /* RLTraceW5 multiplies the 7-fraction-bit tangent table by RSPDistance
+     * and shifts the result by eight: wall columns advance at half scale. */
+    return seg->texture_offset - 0.5 * seg->perpendicular * tan(theta) + seg->offset_x;
+}
+/* Retain native texture placement without interpolating camera-specific
+ * screen pixels. Recompute from this frame's native plots so moving doors
+ * carry their original texture anchor with the changing ceiling. */
+static inline bool DoomResolutionWallPhase(const DoomResolutionSegment *seg,
+    unsigned component,double *u,double *v) {
+    int best=-1;
+    for(int x=0;x<108;x++)
+        if(seg->uv[component][x].valid && (best<0 || abs(x-54)<abs(best-54)))best=x;
+    if(best<0)return false;
+    const DoomResolutionUv *uv=&seg->uv[component][best];
+    *u=uv->u-DoomResolutionWallCoordinate(seg,(2.0*best-108)/DOOM_FOCAL);
+    *v=uv->v+(uv->y-71.0)*uv->step;
+    return true;
+}
 static inline void DoomResolutionWall(DoomResolutionScene *scene,
     const uint8_t *rom, size_t rom_size, const DoomResolutionSegment *seg,
     unsigned component, double source_ray, double depth, int bottom_height,
     unsigned x, int from, int to, unsigned scale, uint8_t *dst, size_t pitch,
     const uint32_t palettes[144][256], const bool visible[144], double *depths) {
-    double theta = -atan(source_ray) - seg->angle * (2 * 3.14159265358979323846 / 65536);
-    double coordinate = seg->texture_offset - seg->perpendicular * tan(theta) + seg->offset_x;
+    double coordinate = DoomResolutionWallCoordinate(seg, source_ray);
+    if(scene->continuous_uv && seg->phase_valid[component])coordinate+=seg->phase_u[component];
     int u = isfinite(coordinate) ? (int)fmod(floor(coordinate), seg->texture_w[component] + 1.0) : 0;
     double native_x = 108 + source_ray * DOOM_FOCAL;
     int a = (int)floor(native_x / 2), b = a + 1;
@@ -224,7 +253,11 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
     while (b <= 107 && !seg->uv[component][b].valid) b++;
     if (a < 0) a = b;
     if (b > 107) b = a;
-    bool native_uv = a >= 0 && b <= 107;
+    /* Quantized WALLPLOT samples are camera-specific. Their phase and
+     * interpolation jump when a widescreen ray switches source cameras.
+     * The native wall angle/distance/offset above instead identify the same
+     * texture point independently of which camera made it visible. */
+    bool native_uv = !scene->continuous_uv && a >= 0 && b <= 107;
     double centre_v = 0, native_step = depth / DOOM_RES_VERTICAL_FOCAL;
     if (native_uv) {
         const DoomResolutionUv *left = &seg->uv[component][a], *right = &seg->uv[component][b];
@@ -256,8 +289,8 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
         double world_z = scene->view_z + (DOOM_RES_HORIZON + scene->horizon_offset - (y + 0.5) / scale) * depth / DOOM_RES_VERTICAL_FOCAL;
         double origin = seg->texture_h[component] & 1
             ? DoomResolutionSigned(sector + 4) : bottom_height;
-        double texture_v = native_uv
-            ? centre_v + (71.5 + scene->horizon_offset - (y + 0.5) / scale) * native_step
+        double texture_v = native_uv || (scene->continuous_uv && seg->phase_valid[component])
+            ? (native_uv ? centre_v : seg->phase_v[component]) + (71.5 + scene->horizon_offset - (y + 0.5) / scale) * native_step
             : world_z - origin - seg->offset_y;
         unsigned v = (unsigned)(int)floor(texture_v) & (h - 1);
         unsigned color = rom[0x1cde00 + (scene->invulnerable ? 32 : row) * 256 + column[v]];

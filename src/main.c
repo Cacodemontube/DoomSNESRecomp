@@ -94,6 +94,7 @@ static const SnesDesktopHostGame kGameHost = {
     .window_base_width   = DoomPresentationWindowWidth,
     .compute_viewport    = DoomPresentationViewport,
     .keyboard_input      = DoomInputKeyboard,
+    .auxiliary_input     = DoomInputAuxiliary,
     .input_event         = DoomInputEvent,
     .input_suspended     = DoomInputSuspended,
 };

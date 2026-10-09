@@ -101,6 +101,27 @@ try {
   do { Start-Sleep -Milliseconds 100; $start=Query 'game input_stats' } while ($start.frame -lt 1400 -and [DateTime]::UtcNow -lt $deadline)
   if (!$start.enabled -or !$start.gameplay -or !$start.movement_updates) { throw 'Native modern-controls hook did not reach gameplay.' }
   Write-Output "Native controls hook active at field $($start.frame)."
+  function Word([string]$address) {
+    $dump=Query ('read_sram '+$address+' 2')
+    $bytes=@($dump.hex -split ' ' | ForEach-Object { [Convert]::ToInt32($_,16) })
+    return $bytes[0]+256*$bytes[1]
+  }
+  $null=Query 'game modern_key_test 1';$null=Query 'step 60'
+  if((Word '1dc') -ne 0) { $detail=Query 'read_sram 1d8 18';$detail|ConvertTo-Json;Query 'game input_stats'|ConvertTo-Json;throw 'Number 1 did not equip the fist through native weapon animation.' }
+  $null=Query 'game modern_key_test 2';$null=Query 'step 60'
+  if((Word '1dc') -ne 2) { throw 'Number 2 did not equip the pistol.' }
+  $null=Query 'game modern_key_test 3';$null=Query 'step 48'
+  if((Word '1dc') -ne 2) { throw 'An unowned shotgun was selected.' }
+  $null=Query 'set_controller x';$null=Query 'step 24';$null=Query 'clear_controller'
+  if((Word '1dc') -ne 2) { throw 'Legacy weapon cycling was not suppressed in modern mode.' }
+  $floor=Word '5ab0';$peak=$floor
+  $null=Query 'game modern_key_test space'
+  for($i=0;$i -lt 12;$i++) {
+    $null=Query 'step 6';$z=Word '5a9c'
+    if($z -gt $peak) {$peak=$z}
+  }
+  if($peak -le $floor -or (Word '5a9c') -ne $floor) { throw 'Jump did not rise and land on the original floor.' }
+  Write-Output "Native weapon switches and jump verified; height=$($peak-$floor)."
   $before = Query 'read_sram 5a8e 38'
   $null = Query ('screenshot '+((Join-Path $root 'center.bmp') -replace '\\','/'))
   $null = Query 'set_controller l'
@@ -133,6 +154,7 @@ try {
   $transcript | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $root 'tcp.json')
   $summary | ConvertTo-Json -Depth 5
 } finally {
+  if($transcript) {$transcript|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $root 'tcp.json')}
   if ($client) { $client.Dispose() }
   if ($process -and !$process.HasExited) { Stop-Process -Id $process.Id }
   foreach ($key in $previous.Keys) { [Environment]::SetEnvironmentVariable($key,$previous[$key],'Process') }
