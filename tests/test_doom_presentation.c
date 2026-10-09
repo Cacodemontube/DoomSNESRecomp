@@ -106,6 +106,9 @@ void DoomRendererConfigure(SuperFx *core, bool wide, bool interpolation,
 }
 
 void DoomRendererSetResolution(unsigned scale) { configured_resolution = scale; }
+void DoomRendererDrawMessages(uint8_t *dst,size_t pitch,unsigned width,unsigned scale) {
+    (void)dst;(void)pitch;(void)width;(void)scale;
+}
 bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch, unsigned width, unsigned scale) {
     (void)dst; (void)pitch; (void)width; (void)scale; return true;
 }

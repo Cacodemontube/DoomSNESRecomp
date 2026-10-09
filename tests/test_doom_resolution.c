@@ -25,6 +25,41 @@ int main(void) {
     CHECK(DoomResolutionCapture(scene,ram,0x10000,0,rom,0x200000));
     CHECK(scene->count==1 && scene->segments[0].x1==-96);
     CHECK(scene->segments[0].z1==132 && scene->segments[0].z2==196);
+    CHECK(scene->segments[0].world_uv);
+    /* Native vertical origins, including moving door ceilings, come from
+     * BUILD world heights, never quantized screen samples. */
+    word(ram+0x7180+4,1);word(ram+0x7180+32,(unsigned)-42);
+    word(ram+0x7180+34,86);word(ram+0x7180+36,22);word(ram+0x7180+38,6);
+    CHECK(DoomResolutionCapture(scene,ram,0x10000,42,rom,0x200000));
+    CHECK(scene->segments[0].texture_origin[0]==0);
+    word(ram+0x7180+4,2);
+    CHECK(DoomResolutionCapture(scene,ram,0x10000,42,rom,0x200000));
+    CHECK(scene->segments[0].texture_origin[0]==64);
+    word(ram+0x7180+36,38);
+    CHECK(DoomResolutionCapture(scene,ram,0x10000,42,rom,0x200000));
+    CHECK(scene->segments[0].texture_origin[0]==80);
+    CHECK(scene->segments[0].texture_origin[1]==48);
+    ram[0x7180+44]=129;
+    CHECK(DoomResolutionCapture(scene,ram,0x10000,42,rom,0x200000));
+    CHECK(scene->segments[0].texture_origin[0]==128);
+    ram[0x7180+44]=0;
+    /* Follow a fixed point on a wall through translation and rotation.
+     * Its texel must remain fixed across frames and visibility cameras,
+     * even if native angle tables and screen samples change. */
+    for(unsigned frame=0;frame<120;frame++) {
+        double yaw=(frame-60.0)*0.009,eye_x=frame*0.3,eye_z=frame*0.1;
+        DoomResolutionSegment wall={.world_uv=true,.offset_x=7};
+        double a=-96-eye_x,b=128-eye_z,c=96-eye_x;
+        wall.x1=a*cos(yaw)-b*sin(yaw);wall.z1=b*cos(yaw)+a*sin(yaw);
+        wall.x2=c*cos(yaw)-b*sin(yaw);wall.z2=b*cos(yaw)+c*sin(yaw);
+        double point_x=(24-eye_x)*cos(yaw)-b*sin(yaw);
+        double point_z=b*cos(yaw)+(24-eye_x)*sin(yaw);
+        wall.angle=(int16_t)(frame*17);wall.perpendicular=(int16_t)(frame+50);
+        wall.texture_offset=(int16_t)frame;
+        CHECK(fabs(DoomResolutionWallCoordinate(&wall,point_x/point_z)-82)<1e-9);
+        wall.texture_w[0]=63;
+        CHECK(fabs(DoomResolutionWallCoordinate(&wall,point_x/point_z)-67)<1e-9);
+    }
     /* Native vertex cache depths are relative to the four-unit screen
      * plane. Recover a close flat wall identically in all three cameras;
      * omitting the offset changes side depth after reprojection. */
@@ -107,6 +142,10 @@ int main(void) {
      * deliberately different quantized native samples, then project the
      * same ray through the centre and both yawed visibility cameras. */
     scene->continuous_uv=true;
+    DoomResolutionSegment native_door={.world_uv=true,.x1=0,.z1=128,
+        .x2=128,.z2=128,.texture_w={63,0}};
+    CHECK(fabs(DoomResolutionWallCoordinate(&native_door,0))<1e-9);
+    CHECK(fabs(DoomResolutionWallCoordinate(&native_door,1)-64)<1e-9);
     DoomResolutionSegment door={.perpendicular=128};
     CHECK(fabs(DoomResolutionWallCoordinate(&door,0))<1e-9);
     /* A 128-world-unit door spans one 64-column image, not two repeats. */
@@ -129,15 +168,36 @@ int main(void) {
         CHECK(out[(y+46)*512+20]!=0);
     }
     *seg=original;scene->continuous_uv=false;
+    seg->uv[0][42].valid=false;
     double native_phase_u,native_phase_v;
     CHECK(DoomResolutionWallPhase(seg,0,&native_phase_u,&native_phase_v));
-    CHECK(fabs(DoomResolutionWallCoordinate(seg,(86.0-108)/DOOM_FOCAL)+native_phase_u-11)<1e-9);
+    CHECK(fabs(DoomResolutionWallCoordinate(seg,(86.0-108)/108.0)+native_phase_u-11)<1e-9);
     /* Re-capturing a moving door's native texture phase must follow its
      * changed ceiling rather than leaving the artwork fixed in world Z. */
     double closed_phase=native_phase_v;
     seg->uv[0][43].v+=16;
     CHECK(DoomResolutionWallPhase(seg,0,&native_phase_u,&native_phase_v));
     CHECK(fabs(native_phase_v-closed_phase-16)<1e-9);
+    /* Rounding in a single newly visible column must not shift an entire
+     * wall by a texel. Include wrapped horizontal/vertical samples and
+     * remove the centre sample to emulate clipping while moving. */
+    DoomResolutionSegment stable={.perpendicular=108,.texture_offset=60,
+        .texture_w={63,0},.texture_h={128,0}};
+    for(int x=20;x<90;x++) {
+        double raw=DoomResolutionWallCoordinate(&stable,(2.0*x-108)/108.0);
+        stable.uv[0][x]=(DoomResolutionUv){.valid=true,
+            .u=(uint8_t)((int)floor(raw)&63),.v=127.75f,.y=71,.step=1};
+    }
+    double before_u,before_v,after_u,after_v;
+    CHECK(DoomResolutionWallPhase(&stable,0,&before_u,&before_v));
+    stable.uv[0][54].valid=false;
+    stable.uv[0][55].u=(stable.uv[0][55].u+1)&63;
+    CHECK(DoomResolutionWallPhase(&stable,0,&after_u,&after_v));
+    CHECK(fabs(remainder(after_u-before_u,64))<0.05);
+    CHECK(fabs(remainder(after_v-before_v,128))<1e-9);
+    for(int x=20;x<90;x++)stable.uv[0][x].v+=16;
+    CHECK(DoomResolutionWallPhase(&stable,0,&after_u,&after_v));
+    CHECK(fabs(remainder(after_v-before_v,128)-16)<1e-9);
     *seg=original;
     seg->uv[0][42].v=130;seg->uv[0][43].v=2;
     DoomResolutionWall(scene,rom,0x200000,seg,0,(85.0-108)/DOOM_FOCAL,

@@ -28,6 +28,7 @@ void DoomRendererPreparePpu(Ppu *ppu);
 void DoomRendererSetResolution(unsigned scale);
 void DoomRendererSetLook(bool enabled, double horizon_offset);
 bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
+void DoomRendererDrawMessages(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
 /* Called by the beam driver after each authentic visible scanline. */
 void DoomRendererObserveLine(const Ppu *ppu, unsigned line, void *context);
 void DoomRendererEndSimFrame(unsigned number);

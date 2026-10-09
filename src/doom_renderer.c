@@ -75,6 +75,7 @@ typedef struct RenderJob {
     uint8_t *picture, *ram;
     uint16_t *floors;
     uint8_t *objects;
+    uint8_t *messages;
     uint8_t *floor_used;
     DoomResolutionScene *resolution_scene;
     unsigned third;
@@ -108,6 +109,7 @@ typedef struct RenderState {
     DoomResolutionScene resolution_scenes[3];
     uint8_t pictures[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
     uint8_t object_pixels[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
+    uint8_t message_pixels[DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
     /* Sector texture pointers identify solid floors/ceilings; the two sky
      * sentinels identify the original panorama chosen by the private GSU. */
     uint16_t floors[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
@@ -187,6 +189,9 @@ static bool SupportedRom(const SuperFx *fx)
     static const uint8_t floor_plot[] = {0x4e, 0x4c, 0xb4, 0x4e, 0x3c, 0x4c};
     static const uint8_t object_plot[] = {0x4c, 0xec, 0x09};
     static const uint8_t sky_plot[] = {0x4c, 0x3c, 0x4c, 0xb8, 0x3f, 0xdf};
+    static const uint8_t text_plot[] = {
+        0xdf,0xde,0x4c,0xdf,0xde,0x4c,0xdf,0xde,0x4c,0xdf,0xde,0x4c,
+        0xdf,0xde,0x4c,0xdf,0xde,0x4c,0xdf,0xde,0x4c,0xdf,0xde,0x4c};
     return fx && fx->rom && fx->ram && fx->rom_size == 0x200000 &&
         fx->ram_size >= 0x10000 &&
         memcmp(fx->rom + kBsp - 0x8000, bsp, sizeof(bsp)) == 0 &&
@@ -202,7 +207,8 @@ static bool SupportedRom(const SuperFx *fx)
                sizeof(object_plot)) == 0 &&
         memcmp(fx->rom + kObjectPlotRepeat - 0x8000, object_plot,
                sizeof(object_plot)) == 0 &&
-        memcmp(fx->rom + kSkyPlot - 0x8000, sky_plot, sizeof(sky_plot)) == 0;
+        memcmp(fx->rom + kSkyPlot - 0x8000, sky_plot, sizeof(sky_plot)) == 0 &&
+        memcmp(fx->rom+0x65ab,text_plot,sizeof(text_plot))==0;
 }
 
 static void Capture(SuperFx *fx, uint32_t pc, void *context)
@@ -475,6 +481,15 @@ static void MaskObjectPixel(SuperFx *fx, uint32_t pc, void *context)
     }
 }
 
+static void RecordMessagePixel(SuperFx *fx, uint32_t pc, void *context)
+{
+    (void)pc;
+    RenderJob *job=context;
+    unsigned x=superfx_reg(fx,1),y=superfx_reg(fx,2);
+    if(job->messages && fx->colr && x<72 && y<DOOM_VIEW_HEIGHT && job->third<3)
+        job->messages[y*DOOM_VIEW_WIDTH+job->third*72+x]=fx->colr;
+}
+
 static void RecordSkyPixel(SuperFx *fx, uint32_t pc, void *context)
 {
     (void)pc;
@@ -509,10 +524,18 @@ static bool RunPrivateTask(RenderJob *job, SuperFx *source, SuperFx *result,
             {kObjectPlotUnique, MaskObjectPixel, job},
             {kObjectPlotRepeat, MaskObjectPixel, job},
             {kSkyPlot, RecordSkyPixel, job},
+            {0xe5ad, RecordMessagePixel, job},
+            {0xe5b0, RecordMessagePixel, job},
+            {0xe5b3, RecordMessagePixel, job},
+            {0xe5b6, RecordMessagePixel, job},
+            {0xe5b9, RecordMessagePixel, job},
+            {0xe5bc, RecordMessagePixel, job},
+            {0xe5bf, RecordMessagePixel, job},
+            {0xe5c2, RecordMessagePixel, job},
         };
         completed = superfx_replay_snapshot_with_history(source, job->ram, result,
             draw ? draw_hooks : job->yaw ? build_hooks : NULL,
-            draw ? 4 : job->yaw ? 2 : 0, false);
+            draw ? sizeof(draw_hooks)/sizeof(draw_hooks[0]) : job->yaw ? 2 : 0, false);
     } else {
         completed = superfx_replay_snapshot_with_history(source, job->ram, result,
                                                          NULL, 0, false);
@@ -690,6 +713,7 @@ static void ExecuteRenderJob(RenderJob *job)
     const Camera camera = job->camera;
     const double fraction = job->fraction;
     const int yaw = job->yaw;
+    if(!yaw)memset(s.message_pixels,0,sizeof(s.message_pixels));
     if (s.resolution_scale > 1 || s.look_enabled || s.widescreen) {
         unsigned view = job->picture == s.pictures[0] ? 0 :
                         job->picture == s.pictures[1] ? 1 : 2;
@@ -699,6 +723,9 @@ static void ExecuteRenderJob(RenderJob *job)
         job->floor_used = s.floor_used[view];
         job->objects = s.object_pixels[view];
         memset(job->objects, 0, DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT);
+        if(!job->yaw) {
+            job->messages=s.message_pixels;
+        }
     }
     SuperFx source = s.snapshot, result;
     if (job->floors) {
@@ -1301,6 +1328,23 @@ void DoomRendererSetLook(bool enabled, double horizon_offset)
     s.horizon_offset = enabled ? fmax(-42, fmin(42, horizon_offset)) : 0;
 }
 
+void DoomRendererDrawMessages(uint8_t *dst,size_t pitch,unsigned width,unsigned scale)
+{
+    if(!dst || !s.cached || width<256 || !scale || scale>4)return;
+    unsigned left=(width-256)/2+kNativeViewX;
+    for(unsigned y=0;y<DOOM_VIEW_HEIGHT;y++) {
+        if(!s.visible_rows[y])continue;
+        for(unsigned x=0;x<DOOM_VIEW_WIDTH;x++) {
+            unsigned color=s.message_pixels[y*DOOM_VIEW_WIDTH+x];
+            if(!color)continue;
+            for(unsigned dy=0;dy<scale;dy++) {
+                uint32_t *row=(uint32_t *)(dst+((y+kNativeViewY)*scale+dy)*pitch);
+                for(unsigned dx=0;dx<scale;dx++)row[(left+x)*scale+dx]=s.palettes[y][color];
+            }
+        }
+    }
+}
+
 bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
                                 unsigned width, unsigned scale)
 {
@@ -1319,6 +1363,7 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
         for (unsigned view=0;view<3;view++)
         for (unsigned i=0;i<s.resolution_scenes[view].count;i++) {
             DoomResolutionSegment *seg=&s.resolution_scenes[view].segments[i];
+            if(seg->world_uv)continue;
             for(unsigned component=0;component<2;component++) {
                 seg->phase_valid[component]=false;
                 for(unsigned ref=0;ref<3 && !seg->phase_valid[component];ref++)
@@ -1382,6 +1427,7 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
             for (unsigned x = x0; x < x1; x++) {
                 unsigned picture = s.map_picture[x];
                 unsigned offset = s.map_y[source_y][x] * DOOM_VIEW_WIDTH + s.map_x[x];
+                if(picture==0 && s.message_pixels[offset])continue;
                 /* In widescreen, retain only original central sprite pixels.
                  * World geometry and side sprites use the common projection. */
                 if (wide && (picture != 0 || !s.object_pixels[0][offset])) continue;

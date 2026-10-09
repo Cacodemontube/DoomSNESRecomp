@@ -19,6 +19,10 @@ enum { DOOM_RES_SCREEN_PLANE = 4 };
  * billboard feet must share this projection, including plane depth tests. */
 #define DOOM_RES_VERTICAL_FOCAL 128.0
 #define DOOM_RES_HORIZON 71.5
+/* Horizontal texture density includes the 1.25 SNES pixel aspect factor.
+ * Keep this separate from projection so geometry and billboard sizes stay
+ * fixed when matching the narrower native wall artwork. */
+#define DOOM_RES_WALL_TEXELS_PER_UNIT (0.5 * 1.25)
 typedef struct DoomResolutionUv {
     float v, step;
     uint8_t u, y;
@@ -36,6 +40,8 @@ typedef struct DoomResolutionSegment {
     uint8_t texture_h[2], texture_w[2], offset_x, offset_y;
     int16_t angle, perpendicular, texture_offset;
     uint16_t vertex[2];
+    int texture_origin[2];
+    bool world_uv;
     double phase_u[2], phase_v[2];
     bool phase_valid[2];
     DoomResolutionUv uv[2][108];
@@ -113,6 +119,16 @@ static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
         seg->angle = (int16_t)DoomResolutionWord(p + 56);
         seg->perpendicular = (int16_t)DoomResolutionWord(p + 58);
         seg->texture_offset = (int16_t)DoomResolutionWord(p + 60);
+        /* RLTraceW3 pegs flagged textures to the near ceiling. Otherwise
+         * RLTraceW2 supplies floor Z for solid walls, far ceiling Z for
+         * upper walls (including doors), and far floor Z for lower walls.
+         * These BUILD heights are relative to the eye. */
+        seg->world_uv=true;
+        for(unsigned component=0;component<2;component++) {
+            unsigned origin=seg->texture_h[component]&1 ? 34 :
+                component==1 ? 38 : (seg->flags&1) ? 32 : 36;
+            seg->texture_origin[component]=view_z+DoomResolutionSigned(p+origin);
+        }
     }
     scene->count = count;
     return count != 0;
@@ -218,14 +234,30 @@ static inline void DoomResolutionPlane(DoomResolutionScene *scene,
 }
 static inline double DoomResolutionWallCoordinate(const DoomResolutionSegment *seg,
     double source_ray) {
+    if(seg->world_uv) {
+        double dx=seg->x2-seg->x1,dz=seg->z2-seg->z1;
+        double denominator=dx-source_ray*dz;
+        if(fabs(denominator)<1e-9)return NAN;
+        double t=(source_ray*seg->z1-seg->x1)/denominator;
+        /* Measure along the wall from vertex 1 with SNES aspect correction.
+         * Use the same intersection as geometry, avoiding the native
+         * angle/distance lookup approximations and screen-sample phase. */
+        /* Native 64-column artwork (including doors) fills 128 map units.
+         * Applying the wall aspect adjustment here crops its final quarter. */
+        double density=seg->texture_w[0]==63 ? 0.5 : DOOM_RES_WALL_TEXELS_PER_UNIT;
+        return density*t*hypot(dx,dz)+seg->offset_x;
+    }
     double theta = -atan(source_ray) - seg->angle * (2 * 3.14159265358979323846 / 65536);
     /* RLTraceW5 multiplies the 7-fraction-bit tangent table by RSPDistance
      * and shifts the result by eight: wall columns advance at half scale. */
     return seg->texture_offset - 0.5 * seg->perpendicular * tan(theta) + seg->offset_x;
 }
-/* Retain native texture placement without interpolating camera-specific
- * screen pixels. Recompute from this frame's native plots so moving doors
- * carry their original texture anchor with the changing ceiling. */
+/* Recover placement from the complete native wall, rather than letting one
+ * rounded column move the whole texture when visibility or clipping changes.
+ * Average modulo the texture size so repeat boundaries cannot pull the anchor
+ * halfway across the image. Native ScreenXAngleTable uses a focal length of
+ * 108; DOOM_FOCAL includes the output aspect correction and is inappropriate
+ * for interpreting these native samples. Recompute V for moving doors. */
 static inline bool DoomResolutionWallPhase(const DoomResolutionSegment *seg,
     unsigned component,double *u,double *v) {
     int best=-1;
@@ -233,8 +265,28 @@ static inline bool DoomResolutionWallPhase(const DoomResolutionSegment *seg,
         if(seg->uv[component][x].valid && (best<0 || abs(x-54)<abs(best-54)))best=x;
     if(best<0)return false;
     const DoomResolutionUv *uv=&seg->uv[component][best];
-    *u=uv->u-DoomResolutionWallCoordinate(seg,(2.0*best-108)/DOOM_FOCAL);
-    *v=uv->v+(uv->y-71.0)*uv->step;
+    double pu=seg->texture_w[component]+1.0;
+    double pv=seg->texture_h[component]&0xfe;
+    if(!pv)pv=256;
+    double base_u=uv->u-DoomResolutionWallCoordinate(seg,(2.0*best-108)/108.0);
+    double base_v=uv->v+(uv->y-71.0)*uv->step;
+    double sum_u=0,sum_v=0,weight=0;
+    for(int x=0;x<108;x++) {
+        uv=&seg->uv[component][x];
+        if(!uv->valid)continue;
+        double ray=(2.0*x-108)/108.0;
+        double sample_u=uv->u-DoomResolutionWallCoordinate(seg,ray);
+        double sample_v=uv->v+(uv->y-71.0)*uv->step;
+        /* Edge-on samples amplify tangent-table rounding. */
+        double theta=-atan(ray)-seg->angle*(2*3.14159265358979323846/65536);
+        double w=cos(theta);w*=w;
+        sum_u+=w*remainder(sample_u-base_u,pu);
+        sum_v+=w*remainder(sample_v-base_v,pv);
+        weight+=w;
+    }
+    if(weight<1e-12)return false;
+    *u=base_u+sum_u/weight;
+    *v=base_v+sum_v/weight;
     return true;
 }
 static inline void DoomResolutionWall(DoomResolutionScene *scene,
@@ -243,7 +295,7 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
     unsigned x, int from, int to, unsigned scale, uint8_t *dst, size_t pitch,
     const uint32_t palettes[144][256], const bool visible[144], double *depths) {
     double coordinate = DoomResolutionWallCoordinate(seg, source_ray);
-    if(scene->continuous_uv && seg->phase_valid[component])coordinate+=seg->phase_u[component];
+    if(!seg->world_uv && scene->continuous_uv && seg->phase_valid[component])coordinate+=seg->phase_u[component];
     int u = isfinite(coordinate) ? (int)fmod(floor(coordinate), seg->texture_w[component] + 1.0) : 0;
     double native_x = 108 + source_ray * DOOM_FOCAL;
     int a = (int)floor(native_x / 2), b = a + 1;
@@ -257,7 +309,7 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
      * interpolation jump when a widescreen ray switches source cameras.
      * The native wall angle/distance/offset above instead identify the same
      * texture point independently of which camera made it visible. */
-    bool native_uv = !scene->continuous_uv && a >= 0 && b <= 107;
+    bool native_uv = !seg->world_uv && !scene->continuous_uv && a >= 0 && b <= 107;
     double centre_v = 0, native_step = depth / DOOM_RES_VERTICAL_FOCAL;
     if (native_uv) {
         const DoomResolutionUv *left = &seg->uv[component][a], *right = &seg->uv[component][b];
@@ -289,7 +341,8 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
         double world_z = scene->view_z + (DOOM_RES_HORIZON + scene->horizon_offset - (y + 0.5) / scale) * depth / DOOM_RES_VERTICAL_FOCAL;
         double origin = seg->texture_h[component] & 1
             ? DoomResolutionSigned(sector + 4) : bottom_height;
-        double texture_v = native_uv || (scene->continuous_uv && seg->phase_valid[component])
+        double texture_v = seg->world_uv ? world_z-seg->texture_origin[component]-seg->offset_y :
+            native_uv || (scene->continuous_uv && seg->phase_valid[component])
             ? (native_uv ? centre_v : seg->phase_v[component]) + (71.5 + scene->horizon_offset - (y + 0.5) / scale) * native_step
             : world_z - origin - seg->offset_y;
         unsigned v = (unsigned)(int)floor(texture_v) & (h - 1);

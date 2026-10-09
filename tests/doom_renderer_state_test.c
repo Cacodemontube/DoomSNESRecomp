@@ -385,6 +385,23 @@ int main(int argc, char **argv)
     CHECK(output[(100 + kNativeViewY) * 342 + 171] ==
           (0xff000000u | s.pictures[0][100 * DOOM_VIEW_WIDTH + 108]));
     s.snapshot.rom_size = saved_rom_size;
+    /* Text pixels are native, opaque and centred, but never follow mouse
+     * pitch or weapon motion. Scale their screen coordinates uniformly. */
+    memset(s.message_pixels,0,sizeof(s.message_pixels));
+    RenderJob text_job={.messages=s.message_pixels,.third=1};
+    private_fx.r[1].data=5;private_fx.r[2].data=2;private_fx.colr=110;
+    RecordMessagePixel(&private_fx,0xe5ad,&text_job);
+    CHECK(s.message_pixels[2*DOOM_VIEW_WIDTH+77]==110);
+    private_fx.colr=0;RecordMessagePixel(&private_fx,0xe5ad,&text_job);
+    CHECK(s.message_pixels[2*DOOM_VIEW_WIDTH+77]==110);
+    s.palettes[2][110]=0xff123456;
+    for(int shift=-30;shift<=30;shift+=30) {
+        s.horizon_offset=shift;
+        memset(output,0,342*224*4);
+        DoomRendererDrawMessages((uint8_t *)output,342*4,342,1);
+        CHECK(output[(kNativeViewY+2)*342+63+77]==0xff123456);
+        CHECK(output[(kNativeViewY+3)*342+63+77]==0);
+    }
     free(ppu->renderBuffer);
     ppu->renderBuffer = NULL;
 

@@ -137,6 +137,7 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
         if (world) DoomRendererDrawResolution(output, output_pitch, width, scale);
         DoomRendererDrawWeapon(g_ppu, output, output_pitch, width * scale, height * scale, weight, world);
     }
+    if(world)DoomRendererDrawMessages(output,output_pitch,width,scale);
     return 1;
 }
 
