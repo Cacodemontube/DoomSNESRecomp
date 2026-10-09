@@ -90,6 +90,10 @@ typedef struct RenderWorker {
     DoomSemaphore *request, *done;
     bool shutdown;
     RenderJob job;
+    bool raster;
+    uint8_t *dst;
+    size_t pitch;
+    unsigned width,scale,first,last;
 } RenderWorker;
 #endif
 
@@ -143,6 +147,8 @@ typedef struct RenderState {
 
 static RenderState s;
 static void StopWorkers(void);
+static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,
+                                unsigned first,unsigned last,bool wide);
 
 static uint16_t ReadWord(const uint8_t *ram, unsigned address)
 {
@@ -755,7 +761,8 @@ static void ExecuteRenderJob(RenderJob *job)
         DoomResolutionCapture(job->resolution_scene, job->ram, result.ram_size,
                               camera.z, result.rom, result.rom_size);
     if (job->resolution_scene) {
-        DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
+        if(s.resolution_scale<=1)
+            DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
         DoomResolutionCaptureSprites(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
     }
 
@@ -772,11 +779,13 @@ static void ExecuteRenderJob(RenderJob *job)
         RestartPrivateTask(&source, tasks[i]);
         if (!RunPrivateTask(job, &source, &result, stops[i])) return;
         if (job->resolution_scene && (tasks[i] == kBuildB || tasks[i] == kBuildC)) {
-            DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
+            if(s.resolution_scale<=1)DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
             DoomResolutionCaptureSprites(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
         }
-        if (tasks[i] == kDrawA || tasks[i] == kDrawB || tasks[i] == kDrawC)
-            DecodeThird(&result, job->picture, job->third++);
+        if (tasks[i] == kDrawA || tasks[i] == kDrawB || tasks[i] == kDrawC) {
+            DecodeThird(&result, job->picture, job->third);
+            job->third++;
+        }
     }
     job->success = true;
 }
@@ -823,7 +832,10 @@ static int RenderWorkerMain(void *context)
     for (;;) {
         DoomWaitSemaphore(worker->request);
         if (worker->shutdown) return 0;
-        ExecuteRenderJob(&worker->job);
+        if(worker->raster)
+            DrawResolutionRange(worker->dst,worker->pitch,worker->width,worker->scale,
+                                worker->first,worker->last,s.widescreen && worker->width>256);
+        else ExecuteRenderJob(&worker->job);
         DoomSignalSemaphore(worker->done);
     }
 }
@@ -882,6 +894,7 @@ static bool RenderViews(Camera camera, double fraction, bool wide)
          * Every join completes before the host can run another native field. */
         for (unsigned i = 0; i < 2; i++) {
             RenderJob *job = &s.workers[i].job;
+            s.workers[i].raster=false;
             memset(job, 0, sizeof(*job));
             job->camera = camera; job->fraction = fraction;
             job->yaw = i == 0 ? -0x2000 : 0x2000;
@@ -1345,6 +1358,43 @@ void DoomRendererDrawMessages(uint8_t *dst,size_t pitch,unsigned width,unsigned 
     }
 }
 
+static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,
+                                unsigned first,unsigned last,bool wide)
+{
+    DoomResolutionColumn columns_cache[256]={0};
+    doom_resolution_batch_columns=columns_cache;
+    unsigned columns = scale == 1 && wide ? 2 : 1;
+    for (unsigned x = first; x < last; x += columns) {
+        double rx = (x + columns * 0.5) / scale - width / 2.0;
+        unsigned view = 0;
+        double yaw = 0;
+        if (rx < -108 || rx >= 108) {
+            view = rx < 0 ? 1 : 2;
+            yaw = rx < 0 ? -DOOM_SIDE_YAW : DOOM_SIDE_YAW;
+        }
+        double sx, sy;
+        DoomProjectRay(rx, 0, yaw, &sx, &sy);
+        double ratio = cos(yaw) + rx / DOOM_FOCAL * sin(yaw);
+        DoomResolutionScene *scene = &s.resolution_scenes[view];
+        if (!scene->count) continue;
+        double depths[144 * 4];
+        DoomResolutionRasterColumn(scene, s.snapshot.rom, s.snapshot.rom_size,
+            s.cached_camera.angle, rx, (sx - 108) / DOOM_FOCAL, ratio,
+            x, scale, dst, pitch, s.palettes, s.visible_rows, depths);
+        if (scale > 1 || (wide && view != 0))
+            DoomResolutionSprites(scene, s.snapshot.rom, s.snapshot.rom_size,
+                (sx - 108) / DOOM_FOCAL, ratio, x, scale, dst, pitch,
+                s.palettes, s.visible_rows, depths);
+        if (columns == 2 && x + 1 < last)
+            for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
+                if (!s.visible_rows[y]) continue;
+                uint32_t *line = (uint32_t *)(dst + (y + kNativeViewY) * pitch);
+                line[x + 1] = line[x];
+            }
+    }
+    doom_resolution_batch_columns=NULL;
+}
+
 bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
                                 unsigned width, unsigned scale)
 {
@@ -1381,37 +1431,26 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
     /* Original low detail draws pairs of columns. Sample a common flat
      * camera at that same density across the complete widescreen view,
      * rather than magnifying the side cameras' framebuffer pixels. */
-    unsigned columns = scale == 1 && wide ? 2 : 1;
-    for (unsigned x = x0 * scale; x < x1 * scale; x += columns) {
-        double rx = (x + columns * 0.5) / scale - width / 2.0;
-        unsigned view = 0;
-        double yaw = 0;
-        if (rx < -108 || rx >= 108) {
-            view = rx < 0 ? 1 : 2;
-            yaw = rx < 0 ? -DOOM_SIDE_YAW : DOOM_SIDE_YAW;
-        }
-        double sx, sy;
-        DoomProjectRay(rx, 0, yaw, &sx, &sy);
-        double ratio = cos(yaw) + rx / DOOM_FOCAL * sin(yaw);
-        DoomResolutionScene *scene = &s.resolution_scenes[view];
-        if (!scene->count) return false;
-        scene->horizon_offset = s.horizon_offset;
-        scene->continuous_uv = wide;
-        double depths[144 * 4];
-        DoomResolutionRasterColumn(scene, s.snapshot.rom, s.snapshot.rom_size,
-            s.cached_camera.angle, rx, (sx - 108) / DOOM_FOCAL, ratio,
-            x, scale, dst, pitch, s.palettes, s.visible_rows, depths);
-        if (scale > 1 || (wide && view != 0))
-            DoomResolutionSprites(scene, s.snapshot.rom, s.snapshot.rom_size,
-                (sx - 108) / DOOM_FOCAL, ratio, x, scale, dst, pitch,
-                s.palettes, s.visible_rows, depths);
-        if (columns == 2 && x + 1 < x1)
-            for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
-                if (!s.visible_rows[y]) continue;
-                uint32_t *line = (uint32_t *)(dst + (y + kNativeViewY) * pitch);
-                line[x + 1] = line[x];
-            }
+    for(unsigned view=0;view<3;view++) {
+        s.resolution_scenes[view].horizon_offset=s.horizon_offset;
+        s.resolution_scenes[view].continuous_uv=wide;
+        if(s.resolution_scenes[view].count)DoomResolutionPreparePlanes(&s.resolution_scenes[view],scale);
     }
+#ifndef DOOM_RENDERER_SYNCHRONOUS
+    if(scale>1 && EnsureWorkers()) {
+        unsigned first=x0*scale,last=x1*scale,span=last-first;
+        for(unsigned i=0;i<2;i++) {
+            RenderWorker *worker=&s.workers[i];
+            worker->raster=true;worker->dst=dst;worker->pitch=pitch;
+            worker->width=width;worker->scale=scale;
+            worker->first=first+span*i/3;worker->last=first+span*(i+1)/3;
+            DoomSignalSemaphore(worker->request);
+        }
+        DrawResolutionRange(dst,pitch,width,scale,first+span*2/3,last,wide);
+        for(unsigned i=0;i<2;i++)DoomWaitSemaphore(s.workers[i].done);
+    } else
+#endif
+        DrawResolutionRange(dst,pitch,width,scale,x0*scale,x1*scale,wide);
     if (scale == 1) {
         /* Low-resolution mouse look translates the native Super FX image.
          * Keep its object size, rounding, column duplication and transparent

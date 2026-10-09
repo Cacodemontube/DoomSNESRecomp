@@ -52,6 +52,9 @@ typedef struct DoomResolutionColumn {
     bool valid;
     uint8_t pixels[256];
 } DoomResolutionColumn;
+/* Parallel column batches own their decode cache; geometry and palette
+ * inputs remain immutable until every batch has joined. */
+static _Thread_local DoomResolutionColumn *doom_resolution_batch_columns;
 typedef struct DoomResolutionScene {
     DoomResolutionSegment segments[DOOM_RES_SEGMENTS];
     unsigned count, sprite_count;
@@ -62,6 +65,11 @@ typedef struct DoomResolutionScene {
     unsigned light_adjust;
     bool invulnerable, sky2, continuous_uv;
     DoomResolutionColumn columns[256];
+    double plane_depth[205][2][144*4];
+    uint8_t plane_light[205][2][144*4];
+    bool plane_ready[205][2];
+    unsigned plane_scale;
+    double plane_horizon;
 } DoomResolutionScene;
 static inline unsigned DoomResolutionWord(const uint8_t *p) {
     return p[0] | ((unsigned)p[1] << 8);
@@ -76,6 +84,7 @@ static inline unsigned DoomResolutionRomAddress(unsigned bank, unsigned address)
 static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
     const uint8_t *ram, size_t size, int view_z, const uint8_t *rom, size_t rom_size) {
     scene->count = scene->sprite_count = 0;
+    scene->plane_scale=0;
     if (!ram || size < 0x10000 || !rom || rom_size < 0x200000 ||
         rom[0x1b0686] != 128 || rom[0x1b0687] != 127) return false;
     unsigned end = DoomResolutionWord(ram + 0xd6);
@@ -167,7 +176,7 @@ static inline const uint8_t *DoomResolutionTextureColumn(DoomResolutionScene *sc
     if (table + 3 > size) return NULL;
     unsigned address = DoomResolutionRomAddress(rom[table + 2],
         DoomResolutionWord(rom + table));
-    DoomResolutionColumn *cache = &scene->columns[(address ^ (address >> 8)) & 255];
+    DoomResolutionColumn *cache = &(doom_resolution_batch_columns ? doom_resolution_batch_columns : scene->columns)[(address ^ (address >> 8)) & 255];
     if (!cache->valid || cache->key != address || cache->height != *height) {
         cache->valid = DoomResolutionDecodeColumn(rom, size, address, *height, cache->pixels);
         cache->key = address; cache->height = *height;
@@ -202,6 +211,28 @@ static inline unsigned DoomResolutionLight(const DoomResolutionScene *scene,
     double level = scale >= 1 ? bright : dark - scale * (dark - bright);
     return (unsigned)fmax(bright, fmin(dark, level)) >> 3;
 }
+static inline void DoomResolutionPreparePlanes(DoomResolutionScene *scene,unsigned scale) {
+    if(scene->plane_scale==scale && scene->plane_horizon==scene->horizon_offset)return;
+    memset(scene->plane_ready,0,sizeof(scene->plane_ready));
+    scene->plane_scale=scale;scene->plane_horizon=scene->horizon_offset;
+    for(unsigned i=0;i<scene->count;i++) {
+        unsigned index=scene->segments[i].near_sector;
+        if(index>=205)continue;
+        const uint8_t *sector=scene->sectors+index*14;
+        for(unsigned ceiling=0;ceiling<2;ceiling++) {
+            if(scene->plane_ready[index][ceiling])continue;
+            double height=DoomResolutionSigned(sector+2+ceiling*2)-scene->view_z;
+            for(unsigned y=0;y<144*scale;y++) {
+                double sy=(y+0.5)/scale-DOOM_RES_HORIZON-scene->horizon_offset;
+                double depth=fabs(sy)>1e-9 ? fabs(height*DOOM_RES_VERTICAL_FOCAL/sy) : 7168;
+                scene->plane_depth[index][ceiling][y]=depth;
+                scene->plane_light[index][ceiling][y]=(uint8_t)DoomResolutionLight(scene,sector,depth,true);
+            }
+            scene->plane_ready[index][ceiling]=true;
+        }
+    }
+}
+
 static inline void DoomResolutionPlane(DoomResolutionScene *scene,
     const uint8_t *rom, unsigned sector_index, bool ceiling,
     unsigned angle, double rx, unsigned x, int from, int to,
@@ -220,10 +251,12 @@ static inline void DoomResolutionPlane(DoomResolutionScene *scene,
             color = rom[DoomSkyRomOffset((uint16_t)angle,
                 (int)floor(rx + 108), (unsigned)sky_y, scene->sky2)];
         } else {
+            bool cached=scene->plane_scale==scale && scene->plane_ready[sector_index][ceiling];
             double sy = ((y + 0.5) / scale - DOOM_RES_HORIZON - scene->horizon_offset);
-            double depth = fabs(sy) > 1e-9 ? fabs(height * DOOM_RES_VERTICAL_FOCAL / sy) : 7168;
+            double depth = cached ? scene->plane_depth[sector_index][ceiling][y] :
+                fabs(sy) > 1e-9 ? fabs(height * DOOM_RES_VERTICAL_FOCAL / sy) : 7168;
             plane_depth = depth;
-            unsigned row = DoomResolutionLight(scene, sector, depth, true);
+            unsigned row = cached ? scene->plane_light[sector_index][ceiling][y] : DoomResolutionLight(scene, sector, depth, true);
             row += (((unsigned)floor(rx) ^ native_y) & 1) ? 0 : 1;
             color = rom[0x1cde00 + (scene->invulnerable ? 32 : row) * 256 + sector[8 + ceiling]];
         }
@@ -298,18 +331,22 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
     if(!seg->world_uv && scene->continuous_uv && seg->phase_valid[component])coordinate+=seg->phase_u[component];
     int u = isfinite(coordinate) ? (int)fmod(floor(coordinate), seg->texture_w[component] + 1.0) : 0;
     double native_x = 108 + source_ray * DOOM_FOCAL;
-    int a = (int)floor(native_x / 2), b = a + 1;
-    if (a < 0) a = 0;
-    if (b > 107) b = 107;
-    while (a >= 0 && !seg->uv[component][a].valid) a--;
-    while (b <= 107 && !seg->uv[component][b].valid) b++;
-    if (a < 0) a = b;
-    if (b > 107) b = a;
+    int a=0,b=0;
+    bool native_uv=false;
+    /* Side-camera rays can lie far outside the native 108-column table.
+     * Never search that table for world-space or off-screen coordinates. */
+    if(!seg->world_uv && !scene->continuous_uv && native_x>=0 && native_x<=214) {
+        a=(int)floor(native_x/2);b=a<107 ? a+1 : 107;
+        while (a >= 0 && !seg->uv[component][a].valid) a--;
+        while (b <= 107 && !seg->uv[component][b].valid) b++;
+        if(a<0)a=b;
+        if(b>107)b=a;
+        native_uv=a>=0 && b<=107;
+    }
     /* Quantized WALLPLOT samples are camera-specific. Their phase and
      * interpolation jump when a widescreen ray switches source cameras.
      * The native wall angle/distance/offset above instead identify the same
      * texture point independently of which camera made it visible. */
-    bool native_uv = !seg->world_uv && !scene->continuous_uv && a >= 0 && b <= 107;
     double centre_v = 0, native_step = depth / DOOM_RES_VERTICAL_FOCAL;
     if (native_uv) {
         const DoomResolutionUv *left = &seg->uv[component][a], *right = &seg->uv[component][b];
@@ -499,7 +536,7 @@ static inline const uint8_t *DoomResolutionSpriteColumn(DoomResolutionScene *sce
     if(table+3>size)return NULL;
     unsigned address=DoomResolutionRomAddress(rom[table+2],DoomResolutionWord(rom+table));
     unsigned key=address | 0x80000000u;
-    DoomResolutionColumn *cache=&scene->columns[(address^(address>>8))&255];
+    DoomResolutionColumn *cache=&(doom_resolution_batch_columns ? doom_resolution_batch_columns : scene->columns)[(address^(address>>8))&255];
     if(!cache->valid || cache->key!=key || cache->height!=sprite->height) {
         cache->valid=DoomResolutionDecodeSprite(rom,size,address,sprite->height,cache->pixels);
         cache->key=key;cache->height=sprite->height;

@@ -261,8 +261,21 @@ int main(void) {
         double ratio=side ? 1.3 : 1.0,depth=sprite->depth/ratio;
         int foot=DoomResolutionClipY(-32,depth,scale,0,144*scale,look);
         for(unsigned y=0;y<144*scale;y++)scaled_depths[y]=INFINITY;
+        scene->plane_scale=0;
         DoomResolutionPlane(scene,rom,0,false,0,0,128*scale,
             0,144*scale,scale,(uint8_t*)scaled,1024*4,palette,visible,scaled_depths);
+        uint32_t expected_plane[576];double expected_depth[576];
+        for(unsigned y=0;y<144*scale;y++) {
+            expected_plane[y]=scaled[(y+23*scale)*1024+128*scale];
+            expected_depth[y]=scaled_depths[y];
+        }
+        DoomResolutionPreparePlanes(scene,scale);
+        DoomResolutionPlane(scene,rom,0,false,0,0,128*scale,
+            0,144*scale,scale,(uint8_t*)scaled,1024*4,palette,visible,scaled_depths);
+        for(unsigned y=0;y<144*scale;y++) {
+            CHECK(expected_plane[y]==scaled[(y+23*scale)*1024+128*scale]);
+            CHECK(expected_depth[y]==scaled_depths[y]);
+        }
         uint32_t before=scaled[(foot-1+23*scale)*1024+128*scale];
         CHECK(scaled_depths[foot-1]>=depth);
         DoomResolutionSprites(scene,rom,0x200000,0,ratio,128*scale,scale,
