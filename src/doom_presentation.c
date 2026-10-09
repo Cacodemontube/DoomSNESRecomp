@@ -12,6 +12,7 @@
 
 static DoomVideoSettings settings;
 static DoomViewport viewport = {256, 0, 4.0 / 3.0};
+static uint8_t resolution_base[DOOM_MAX_WIDTH * DOOM_HEIGHT * 4];
 
 /* Read the selection before window creation, too: the host probes the rate
  * before plugin activation to select its pacing and VSync policy. The normal
@@ -21,6 +22,12 @@ static void ReadSettings(void) {
     DoomVideoDefaults(&settings);
     settings.widescreen = snes_mod_runtime_feature_enabled_c(
         "doom.presentation", "widescreen") != 0;
+    settings.resolution_enabled = snes_mod_runtime_feature_enabled_c(
+        "doom.presentation", "render-resolution") != 0;
+    if (snes_mod_runtime_feature_option_value_c("doom.presentation", "render-resolution",
+                                               "scale", value, sizeof(value)) &&
+        (!strcmp(value, "2") || !strcmp(value, "3") || !strcmp(value, "4")))
+        settings.resolution_scale = (unsigned)(value[0] - '0');
     settings.fps_enabled = snes_mod_runtime_feature_enabled_c(
         "doom.presentation", "presentation-fps") != 0;
     if (snes_mod_runtime_feature_option_value_c("doom.presentation", "widescreen",
@@ -34,6 +41,7 @@ static void ReadSettings(void) {
 SNES_MOD_CONSTRUCTOR(RegisterDoomPresentation) {
     snes_mod_register_presentation_plugin("doom.presentation.widescreen", ReadSettings);
     snes_mod_register_presentation_plugin("doom.presentation.fps", ReadSettings);
+    snes_mod_register_presentation_plugin("doom.presentation.resolution", ReadSettings);
     snes_mod_register_reset_callback(ReadSettings);
 }
 
@@ -42,6 +50,7 @@ void DoomPresentationReset(void) {
 }
 
 static void ConfigureRenderer(void) {
+    DoomRendererSetResolution(settings.resolution_enabled ? settings.resolution_scale : 1);
     if (g_snes && g_snes->cart)
         DoomRendererConfigure(g_snes->cart->superfx, settings.widescreen,
                               settings.fps_enabled && settings.interpolate,
@@ -56,8 +65,9 @@ void DoomPresentationBeforeFrame(void) {
 void DoomPresentationPrepare(int drawable_w, int drawable_h, int *width, int *height) {
     ReadSettings();
     viewport = DoomCalculateViewport(&settings, drawable_w, drawable_h);
-    *width = viewport.width;
-    *height = DOOM_HEIGHT;
+    unsigned scale = settings.resolution_enabled ? settings.resolution_scale : 1;
+    *width = viewport.width * scale;
+    *height = DOOM_HEIGHT * scale;
     ConfigureRenderer();
 }
 
@@ -74,7 +84,7 @@ void DoomPresentationEnd(const uint8_t *field, unsigned number) {
         DoomRendererGetStats(&stats);
         fprintf(stderr, "[doom-render] field=%u supported=%d captured=%llu "
                 "passes=%llu cached=%llu failures=%llu interval=%u "
-                "weapon_updates=%llu weapon_interpolated=%llu weapon_offset=%d,%d weapon_tiles=%u weapon_fallbacks=%llu weapon_translucent=%d\n",
+                "weapon_updates=%llu weapon_interpolated=%llu weapon_offset=%d,%d weapon_tiles=%u weapon_fallbacks=%llu weapon_translucent=%d resolution=%u segments=%u\n",
                 number, stats.supported, (unsigned long long)stats.captures,
                 (unsigned long long)stats.camera_passes,
                 (unsigned long long)stats.cache_hits,
@@ -83,7 +93,7 @@ void DoomPresentationEnd(const uint8_t *field, unsigned number) {
                 (unsigned long long)stats.weapon_interpolated_presentations,
                 stats.weapon_offset_x, stats.weapon_offset_y,
                 stats.weapon_tiles, (unsigned long long)stats.weapon_layout_fallbacks,
-                stats.weapon_translucent);
+                stats.weapon_translucent, stats.resolution_scale, stats.resolution_segments);
     }
 }
 
@@ -93,8 +103,15 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
     /* The stock field is always 256 wide. The generic copy fallback uses
      * output width as source stride, which is inappropriate for a custom
      * compositor. Menus and unsupported scenes stay centered and unstretched. */
-    if (!dst || !field || width < DOOM_STOCK_WIDTH || height != DOOM_HEIGHT ||
-        pitch < (size_t)width * 4) return 0;
+    unsigned scale = settings.resolution_enabled ? settings.resolution_scale : 1;
+    if (!dst || !field || width < DOOM_STOCK_WIDTH * (int)scale ||
+        width > DOOM_MAX_WIDTH * (int)scale || height != DOOM_HEIGHT * (int)scale ||
+        width % scale || pitch < (size_t)width * 4) return 0;
+    uint8_t *output = dst;
+    size_t output_pitch = pitch;
+    width /= scale;
+    height /= scale;
+    if (scale > 1) { dst = resolution_base; pitch = (size_t)width * 4; }
     const int extra = (width - DOOM_STOCK_WIDTH) / 2;
     for (int y = 0; y < height; ++y) {
         uint8_t *row = dst + (size_t)y * pitch;
@@ -103,9 +120,19 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
                DOOM_STOCK_WIDTH * 4);
     }
     float weight = (float)DoomPresentationAlpha(&settings, alpha);
-    if ((!settings.widescreen && !settings.fps_enabled) ||
-        !DoomRendererDraw(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight))
-        DoomRendererDrawWeapon(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight, false);
+    bool world = (settings.widescreen || settings.fps_enabled || settings.resolution_enabled) &&
+        DoomRendererDraw(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight);
+    if (scale == 1) {
+        if (!world) DoomRendererDrawWeapon(g_ppu, dst, pitch, width, height, weight, false);
+    } else {
+        for (int y = 0; y < height * (int)scale; y++) {
+            uint32_t *row = (uint32_t *)(output + (size_t)y * output_pitch);
+            const uint32_t *source = (const uint32_t *)(dst + (size_t)(y / scale) * pitch);
+            for (int x = 0; x < width * (int)scale; x++) row[x] = source[x / scale];
+        }
+        if (world) DoomRendererDrawResolution(output, output_pitch, width, scale);
+        DoomRendererDrawWeapon(g_ppu, output, output_pitch, width * scale, height * scale, weight, world);
+    }
     return 1;
 }
 
@@ -118,7 +145,7 @@ int DoomPresentationKeepDebt(void) {
     /* A costly camera pass may miss a deadline. Keep simulation on its
      * original clock and catch up through cached presents, as F-Zero does,
      * instead of permanently turning each missed deadline into slow motion. */
-    return settings.widescreen || settings.fps_enabled;
+    return settings.widescreen || settings.fps_enabled || settings.resolution_enabled;
 }
 
 int DoomPresentationWindowWidth(int width) {

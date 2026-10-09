@@ -3,6 +3,8 @@ param(
   [string]$Rom = 'C:/Roms/Doom (USA).sfc',
   [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string]$RunLabel,
   [switch]$Enhancements,
+  [ValidateSet(0,2,3,4)][int]$ResolutionScale = 0,
+  [ValidateSet('Fit','4:3','16:9','21:9','32:9')][string]$Aspect = 'Fit',
   [switch]$WidescreenOnly,
   [switch]$InterpolationOnly,
   [ValidateSet('Auto','60','90','120','144','165','240','360')][string]$Fps = 'Auto',
@@ -26,8 +28,9 @@ Copy-Item (Join-Path $source 'DoomSNESRecomp.exe') $root
 Get-ChildItem $source -Filter '*.dll' | Copy-Item -Destination $root
 New-Item -ItemType Directory (Join-Path $root 'mods/preloaded') -Force | Out-Null
 Copy-Item (Join-Path $source 'mods/preloaded/packages') (Join-Path $root 'mods/preloaded') -Recurse
-if ($Enhancements -or $WidescreenOnly -or $InterpolationOnly) {
+if ($Enhancements -or $WidescreenOnly -or $InterpolationOnly -or $ResolutionScale) {
   $wide = if ($Enhancements -or $WidescreenOnly) { 'true' } else { 'false' }
+  $resolution = if ($ResolutionScale) { 'true' } else { 'false' }
   $interpolate = if ($Enhancements -or $InterpolationOnly) { 'true' } else { 'false' }
   $state = @"
 format_version = 1
@@ -39,13 +42,19 @@ package_id = "doom.presentation"
 id = "widescreen"
 enabled = $wide
 [feature.values]
-aspect = "Fit"
+aspect = "$Aspect"
 [[feature]]
 package_id = "doom.presentation"
 id = "presentation-fps"
 enabled = $interpolate
 [feature.values]
 fps = "$Fps"
+[[feature]]
+package_id = "doom.presentation"
+id = "render-resolution"
+enabled = $resolution
+[feature.values]
+scale = "$ResolutionScale"
 "@
   Set-Content (Join-Path $root 'mods/preloaded/state.toml') $state -Encoding ascii
 } else {
@@ -100,7 +109,7 @@ try {
   if ($rows.Count -lt 2) { throw 'Route did not reach the measured gameplay field window (1400-1900).' }
   $intervals = for ($i=1; $i -lt $rows.Count; $i++) { 1000 * ([double]$rows[$i].present_seconds - [double]$rows[$i-1].present_seconds) }
   $sorted = @($intervals | Sort-Object)
-  $summary = [ordered]@{ run=$RunLabel; enhancements=[bool]$Enhancements; widescreenOnly=[bool]$WidescreenOnly; interpolationOnly=[bool]$InterpolationOnly; requestedFps=$Fps; captures=[bool]$Capture; paced=[bool]$Paced; desktop=[bool]$Desktop; audio=[bool]$Audio; samples=$rows.Count; binarySha256=(Get-FileHash (Join-Path $root 'DoomSNESRecomp.exe')).Hash; romSha256=(Get-FileHash $Rom).Hash; meanIntervalMs=($intervals | Measure-Object -Average).Average; p95Ms=$sorted[[int](($sorted.Count-1)*0.95)]; p99Ms=$sorted[[int](($sorted.Count-1)*0.99)]; maxMs=($intervals | Measure-Object -Maximum).Maximum }
+  $summary = [ordered]@{ run=$RunLabel; resolutionScale=$ResolutionScale; aspect=$Aspect; enhancements=[bool]$Enhancements; widescreenOnly=[bool]$WidescreenOnly; interpolationOnly=[bool]$InterpolationOnly; requestedFps=$Fps; captures=[bool]$Capture; paced=[bool]$Paced; desktop=[bool]$Desktop; audio=[bool]$Audio; samples=$rows.Count; binarySha256=(Get-FileHash (Join-Path $root 'DoomSNESRecomp.exe')).Hash; romSha256=(Get-FileHash $Rom).Hash; meanIntervalMs=($intervals | Measure-Object -Average).Average; p95Ms=$sorted[[int](($sorted.Count-1)*0.95)]; p99Ms=$sorted[[int](($sorted.Count-1)*0.99)]; maxMs=($intervals | Measure-Object -Maximum).Maximum }
   foreach ($key in @('guest_ms','raster_ms','compose_ms','present_ms','hook_ms','wait_ms','guest_periods')) { $summary[$key] = ($rows | ForEach-Object { [double]$_.$key } | Measure-Object -Average).Average }
   $summary | ConvertTo-Json | Set-Content (Join-Path $root 'summary.json')
   $summary | ConvertTo-Json

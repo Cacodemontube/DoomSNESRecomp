@@ -29,14 +29,16 @@ static Ppu ppu;
 Snes *g_snes = &machine;
 Ppu *g_ppu = &ppu;
 
-static bool wide_enabled, fps_enabled;
+static bool wide_enabled, fps_enabled, resolution_enabled;
+static const char *resolution_option = "2";
+static unsigned configured_resolution;
 static const char *aspect_option = "Fit", *fps_option = "Auto";
 static unsigned registered_plugins, registered_reset, configure_calls;
 static unsigned reset_calls, begin_calls, end_calls, draw_calls;
 static bool configured_wide, configured_interpolation;
 static unsigned configured_width, ended_number;
 static float drawn_alpha;
-static SNESModActivationCallback plugin_callbacks[2], reset_callback;
+static SNESModActivationCallback plugin_callbacks[3], reset_callback;
 
 /* Exercise the production adapter against the actual framework contracts.
  * The runtime itself is replaced only at its public query/registration API. */
@@ -46,6 +48,7 @@ int snes_mod_register_presentation_plugin(const char *id,
     unsigned index;
     if (!strcmp(id, "doom.presentation.widescreen")) index = 0;
     else if (!strcmp(id, "doom.presentation.fps")) index = 1;
+    else if (!strcmp(id, "doom.presentation.resolution")) index = 2;
     else { CHECK(0 && "unexpected presentation plugin id"); return 0; }
     CHECK(!plugin_callbacks[index]);
     plugin_callbacks[index] = callback;
@@ -64,6 +67,7 @@ int snes_mod_runtime_feature_enabled_c(const char *package, const char *feature)
     CHECK(package && !strcmp(package, "doom.presentation"));
     CHECK(feature);
     if (!strcmp(feature, "widescreen")) return wide_enabled;
+    if (!strcmp(feature, "render-resolution")) return resolution_enabled;
     CHECK(!strcmp(feature, "presentation-fps"));
     return fps_enabled;
 }
@@ -76,6 +80,9 @@ int snes_mod_runtime_feature_option_value_c(const char *package,
     if (!strcmp(feature, "widescreen")) {
         CHECK(!strcmp(option, "aspect"));
         value = aspect_option;
+    } else if (!strcmp(feature, "render-resolution")) {
+        CHECK(!strcmp(option, "scale"));
+        value = resolution_option;
     } else {
         CHECK(!strcmp(feature, "presentation-fps") && !strcmp(option, "fps"));
         value = fps_option;
@@ -94,6 +101,10 @@ void DoomRendererConfigure(SuperFx *core, bool wide, bool interpolation,
     configure_calls++;
 }
 
+void DoomRendererSetResolution(unsigned scale) { configured_resolution = scale; }
+bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch, unsigned width, unsigned scale) {
+    (void)dst; (void)pitch; (void)width; (void)scale; return true;
+}
 void DoomRendererPreparePpu(Ppu *source) {
     CHECK(source == g_ppu);
     begin_calls++;
@@ -148,7 +159,20 @@ bool DoomRendererDrawWeapon(Ppu *source, uint8_t *dst, size_t pitch,
                             unsigned width, unsigned height, float alpha,
                             bool world_redrawn) {
     CHECK(source == g_ppu && !world_redrawn);
-    CheckSeed(dst, pitch, width, height);
+    if (height == DOOM_HEIGHT) CheckSeed(dst, pitch, width, height);
+    else {
+        unsigned scale = height / DOOM_HEIGHT;
+        CHECK(scale >= 2 && scale <= 4 && width == expected_width * scale);
+        unsigned extra = (expected_width - 256) / 2;
+        for (unsigned y = 0; y < height; y++)
+            for (unsigned x = 0; x < width; x++) {
+                const uint32_t *row = (const uint32_t *)(dst + y * pitch);
+                unsigned sx = x / scale;
+                uint32_t expected = sx >= extra && sx < extra + 256
+                    ? ((const uint32_t *)expected_field)[(y / scale) * 256 + sx - extra] : 0;
+                CHECK(row[x] == expected);
+            }
+    }
     CHECK(alpha >= 0 && alpha <= 1);
     return true;
 }
@@ -166,7 +190,7 @@ static void SetOptions(bool wide, const char *aspect, bool fps, const char *rate
 }
 
 static void settings_tests(void) {
-    CHECK(registered_plugins == 2 && registered_reset == 1);
+    CHECK(registered_plugins == 3 && registered_reset == 1);
     int width, height;
     SetOptions(false, "21:9", false, "144");
     CHECK(DoomPresentationRate(165) == 0);
@@ -201,6 +225,21 @@ static void settings_tests(void) {
     CHECK(configured_width == 342);
     CHECK(configure_calls >= 5);
 
+    resolution_enabled = true;
+    for (unsigned scale = 2; scale <= 4; scale++) {
+        char option[2] = {(char)('0' + scale), 0};
+        resolution_option = option;
+        DoomPresentationPrepare(1920, 1080, &width, &height);
+        CHECK(width == 342 * (int)scale && height == 224 * (int)scale);
+        CHECK(configured_width == 342 && configured_resolution == scale);
+    }
+    resolution_option = "invalid";
+    DoomPresentationPrepare(1920, 1080, &width, &height);
+    CHECK(width == 684 && height == 448 && configured_resolution == 2);
+    resolution_enabled = false;
+    resolution_option = "2";
+    DoomPresentationPrepare(1920, 1080, &width, &height);
+    CHECK(width == 342 && height == 224 && configured_resolution == 1);
     DoomPresentationBegin(123);
     DoomPresentationEnd(NULL, 123);
     CHECK(begin_calls == 1 && end_calls == 1 && ended_number == 123);
@@ -258,10 +297,38 @@ static void fallback_test(unsigned width, bool wide, bool fps, double alpha) {
     free(guarded);
 }
 
+static void resolution_fallback_tests(void) {
+    for (unsigned scale = 2; scale <= 4; scale++) {
+        resolution_enabled = true;
+        char option[2] = {(char)('0' + scale), 0};
+        resolution_option = option;
+        SetOptions(false, "Fit", false, "Auto");
+        int w, h;
+        DoomPresentationPrepare(960, 720, &w, &h);
+        size_t pitch = (w + 7) * 4, bytes = pitch * h;
+        uint8_t *guard = malloc(bytes + GUARD_BYTES * 2);
+        uint32_t *field = malloc(256 * 224 * 4);
+        CHECK(guard && field);
+        memset(guard, GUARD_VALUE, bytes + GUARD_BYTES * 2);
+        for (unsigned i = 0; i < 256 * 224; i++) field[i] = 0xff000000 | i;
+        expected_field = (uint8_t *)field; expected_width = 256; expected_pitch = 256 * 4;
+        CHECK(DoomPresentationDraw(guard + GUARD_BYTES, pitch, (uint8_t *)field, w, h, 0.5));
+        for (unsigned y = 0; y < (unsigned)h; y++)
+            for (size_t x = w * 4; x < pitch; x++)
+                CHECK(guard[GUARD_BYTES + y * pitch + x] == GUARD_VALUE);
+        for (unsigned i = 0; i < GUARD_BYTES; i++) {
+            CHECK(guard[i] == GUARD_VALUE);
+            CHECK(guard[GUARD_BYTES + bytes + i] == GUARD_VALUE);
+        }
+        free(field); free(guard);
+    }
+    resolution_enabled = false; resolution_option = "2"; expected_field = NULL;
+}
 int main(void) {
     machine.cart = &cart;
     cart.superfx = &fx;
     settings_tests();
+    resolution_fallback_tests();
     fallback_test(256, false, false, 0.25);
     fallback_test(256, false, true, 0.25);
     fallback_test(342, true, false, 0.25);

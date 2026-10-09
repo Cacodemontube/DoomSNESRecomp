@@ -21,6 +21,8 @@ typedef struct DoomVideoSettings {
     bool fps_enabled;
     unsigned fps; /* 0 = Auto (display refresh). */
     bool interpolate;
+    bool resolution_enabled;
+    unsigned resolution_scale;
 } DoomVideoSettings;
 
 typedef struct DoomViewport {

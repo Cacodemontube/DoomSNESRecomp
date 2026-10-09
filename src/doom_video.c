@@ -15,7 +15,8 @@ static const char *const fps_names[] = {
 void DoomVideoDefaults(DoomVideoSettings *settings) {
     if (settings)
         *settings = (DoomVideoSettings){.aspect = DOOM_ASPECT_FIT,
-                                       .interpolate = true};
+                                       .interpolate = true,
+                                       .resolution_scale = 2};
 }
 
 void DoomVideoStock(DoomVideoSettings *settings) {

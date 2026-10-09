@@ -93,7 +93,7 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         "\"weapon_updates\":%llu,\"weapon_interpolated_presentations\":%llu,"
         "\"weapon_offset_x\":%d,\"weapon_offset_y\":%d,"
         "\"weapon_tiles\":%u,\"weapon_layout_fallbacks\":%llu,\"weapon_translucent\":%s,"
-        "\"invisibility_ticks\":%u,"
+        "\"invisibility_ticks\":%u,\"resolution_scale\":%u,\"resolution_segments\":%u,"
         "\"draw_calls\":%llu,\"draw_total_ms\":%.6f,\"draw_max_ms\":%.6f}",
         frame, p1, p2, stats.supported ? "true" : "false", stats.has_snapshot ? "true" : "false",
         (unsigned long long)stats.captures, (unsigned long long)stats.camera_passes,
@@ -104,6 +104,7 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         stats.weapon_offset_x, stats.weapon_offset_y,
         stats.weapon_tiles, (unsigned long long)stats.weapon_layout_fallbacks,
         stats.weapon_translucent ? "true" : "false", invisibility_ticks,
+        stats.resolution_scale, stats.resolution_segments,
         draws, draw_total_ms, draw_max_ms);
     UNLOCK();
     send(json);

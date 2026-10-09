@@ -14,7 +14,7 @@ typedef struct DoomRendererStats {
     uint64_t weapon_updates, weapon_interpolated_presentations;
     int weapon_offset_x, weapon_offset_y;
     uint64_t weapon_layout_fallbacks;
-    unsigned weapon_tiles;
+    unsigned weapon_tiles, resolution_scale, resolution_segments;
     bool weapon_translucent;
     unsigned snapshot_interval;
     bool supported, has_snapshot;
@@ -25,6 +25,8 @@ typedef struct DoomRendererStats {
 void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
                            unsigned width);
 void DoomRendererPreparePpu(Ppu *ppu);
+void DoomRendererSetResolution(unsigned scale);
+bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
 /* Called by the beam driver after each authentic visible scanline. */
 void DoomRendererObserveLine(const Ppu *ppu, unsigned line, void *context);
 void DoomRendererEndSimFrame(unsigned number);

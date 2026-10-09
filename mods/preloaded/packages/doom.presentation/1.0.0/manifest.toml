@@ -101,3 +101,34 @@ label = "240"
 [[option.choice]]
 value = "360"
 label = "360"
+
+[[feature]]
+id = "render-resolution"
+name = "Higher 3D resolution"
+description = "Render world geometry and wall textures at a higher resolution. Objects are sampled from original artwork at the selected resolution; HUD and weapons retain their original pixel art. Higher levels require more CPU time."
+group = "Presentation"
+default_enabled = false
+presentation_only = true
+
+[[plugin]]
+feature = "render-resolution"
+id = "doom.presentation.resolution"
+
+[[option]]
+feature = "render-resolution"
+id = "scale"
+label = "3D resolution"
+type = "choice"
+default = "2"
+
+[[option.choice]]
+value = "2"
+label = "2x (432 x 288 at 4:3)"
+
+[[option.choice]]
+value = "3"
+label = "3x (648 x 432 at 4:3)"
+
+[[option.choice]]
+value = "4"
+label = "4x (864 x 576 at 4:3)"

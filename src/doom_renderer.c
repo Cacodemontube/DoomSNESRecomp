@@ -18,6 +18,7 @@
 #include "doom_sky.h"
 #include "doom_weapon.h"
 #include "doom_weapon_sprite.h"
+#include "doom_resolution.h"
 
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
@@ -74,6 +75,7 @@ typedef struct RenderJob {
     uint8_t *picture, *ram;
     uint16_t *floors;
     uint8_t *floor_used;
+    DoomResolutionScene *resolution_scene;
     unsigned third;
     uint64_t instructions;
     bool success;
@@ -99,6 +101,8 @@ typedef struct RenderState {
     RenderWorker workers[2];
     bool workers_unavailable;
 #endif
+    unsigned resolution_scale;
+    DoomResolutionScene resolution_scenes[3];
     uint8_t pictures[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
     /* Sector texture pointers identify solid floors/ceilings; the two sky
      * sentinels identify the original panorama chosen by the private GSU. */
@@ -201,7 +205,7 @@ static void Capture(SuperFx *fx, uint32_t pc, void *context)
 {
     (void)pc;
     (void)context;
-    if (!(s.widescreen || s.interpolation) || !s.ram ||
+    if (!(s.widescreen || s.interpolation || s.resolution_scale > 1) || !s.ram ||
         ReadWord(fx->ram, kAutoMap) != 0)
         return;
 
@@ -281,6 +285,7 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
         s.rom_identity = fx ? fx->rom : NULL;
         s.ram_identity = fx ? fx->ram : NULL;
         s.supported = SupportedRom(fx);
+        for (unsigned i = 0; i < 3; i++) memset(&s.resolution_scenes[i], 0, sizeof(s.resolution_scenes[i]));
         s.hook_installed = false;
         s.has_snapshot = s.has_previous = s.has_presented = s.cached = false;
         s.weapon_motion = (DoomWeaponMotion){0};
@@ -296,7 +301,7 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
     s.interpolation = interpolation;
     s.configured_width = width;
 
-    if (!s.supported || !(widescreen || interpolation)) {
+    if (!s.supported || !(widescreen || interpolation || s.resolution_scale > 1)) {
         if (s.hook_installed) {
             superfx_set_pc_hook(fx, kBsp, NULL, NULL);
             s.hook_installed = false;
@@ -332,7 +337,7 @@ static bool WeaponGameplay(const Ppu *ppu)
 static bool Gameplay(const Ppu *ppu)
 {
     return ppu && s.fx && s.has_snapshot && s.supported &&
-        (s.widescreen || s.interpolation) &&
+        (s.widescreen || s.interpolation || s.resolution_scale > 1) &&
         /* Capture runs inside the next native field, before PreparePpu and
          * EndSimFrame publish it. That pending field is fresh, not unsigned
          * history-age underflow. Other future or old snapshots stay invalid. */
@@ -459,7 +464,9 @@ static void MaskObjectPixel(SuperFx *fx, uint32_t pc, void *context)
     job->floors[offset] = 0;
     /* The second PLOT is the conditional branch's delay-slot instruction,
      * so it executes even for the final pixel in the object strip. */
-    if (x + 1 < 72) job->floors[offset + 1] = 0;
+    if (x + 1 < 72) {
+        job->floors[offset + 1] = 0;
+    }
 }
 
 static void RecordSkyPixel(SuperFx *fx, uint32_t pc, void *context)
@@ -472,6 +479,7 @@ static void RecordSkyPixel(SuperFx *fx, uint32_t pc, void *context)
      * Preserve that decision rather than imposing a host episode mapping. */
     const unsigned sky = superfx_reg(fx, 5) & 0x4000
         ? kDoomSky2Surface : kDoomSky1Surface;
+    if (job->resolution_scene) job->resolution_scene->sky2 = sky == kDoomSky2Surface;
     const unsigned offset = y * DOOM_VIEW_WIDTH + job->third * 72 + x;
     job->floors[offset] = job->floors[offset + 1] = (uint16_t)sky;
 }
@@ -676,6 +684,14 @@ static void ExecuteRenderJob(RenderJob *job)
     const Camera camera = job->camera;
     const double fraction = job->fraction;
     const int yaw = job->yaw;
+    if (s.resolution_scale > 1) {
+        unsigned view = job->picture == s.pictures[0] ? 0 :
+                        job->picture == s.pictures[1] ? 1 : 2;
+        job->resolution_scene = &s.resolution_scenes[view];
+        job->resolution_scene->count = 0;
+        job->floors = s.floors[view];
+        job->floor_used = s.floor_used[view];
+    }
     SuperFx source = s.snapshot, result;
     if (job->floors) {
         memset(job->floors, 0, DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT * sizeof(uint16_t));
@@ -700,6 +716,13 @@ static void ExecuteRenderJob(RenderJob *job)
     if (yaw)
         WriteWord(job->ram, kMessageCount, 0); /* Keep messages on main view. */
     if (!RunPrivateTask(job, &source, &result, 0xc835)) return;
+    if (job->resolution_scene)
+        DoomResolutionCapture(job->resolution_scene, job->ram, result.ram_size,
+                              camera.z, result.rom, result.rom_size);
+    if (job->resolution_scene) {
+        DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
+        DoomResolutionCaptureSprites(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
+    }
 
     static const unsigned tasks[] = {kDrawA, kBuildB, kDrawB,
                                      kBuildC, kDrawC};
@@ -713,6 +736,10 @@ static void ExecuteRenderJob(RenderJob *job)
         source.ram = s.ram;
         RestartPrivateTask(&source, tasks[i]);
         if (!RunPrivateTask(job, &source, &result, stops[i])) return;
+        if (job->resolution_scene && (tasks[i] == kBuildB || tasks[i] == kBuildC)) {
+            DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
+            DoomResolutionCaptureSprites(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
+        }
         if (tasks[i] == kDrawA || tasks[i] == kDrawB || tasks[i] == kDrawC)
             DecodeThird(&result, job->picture, job->third++);
     }
@@ -1134,7 +1161,8 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
             line[x] = s.palettes[y][color];
         }
     }
-    DoomRendererDrawWeapon(ppu, dst, pitch, width, height, alpha, true);
+    if (s.resolution_scale <= 1)
+        DoomRendererDrawWeapon(ppu, dst, pitch, width, height, alpha, true);
     return true;
 }
 
@@ -1142,9 +1170,14 @@ bool DoomRendererDrawWeapon(Ppu *ppu, uint8_t *dst, size_t pitch,
                             unsigned width, unsigned height, float alpha,
                             bool world_redrawn)
 {
-    if (!WeaponGameplay(ppu) || !dst || width < 256 || width > kPpuBufWidth ||
-        pitch < width * 4 || height < kNativeViewY + DOOM_VIEW_HEIGHT)
+    const unsigned scale = height / 224;
+    const unsigned logical_width = scale ? width / scale : 0;
+    if (!WeaponGameplay(ppu) || !dst || scale < 1 || scale > 4 ||
+        height != scale * 224 || width != logical_width * scale ||
+        logical_width < 256 || logical_width > kPpuBufWidth ||
+        pitch < width * 4)
         return false;
+    width = logical_width;
     int dx, dy;
     DoomWeaponOffset(&s.weapon_motion, s.field, alpha,
                      s.interpolation && world_redrawn, &dx, &dy);
@@ -1164,15 +1197,20 @@ bool DoomRendererDrawWeapon(Ppu *ppu, uint8_t *dst, size_t pitch,
                 int y = tile->y + row + dy;
                 if (y < kNativeViewY || y >= kNativeViewY + DOOM_VIEW_HEIGHT ||
                     !s.visible_rows[y - kNativeViewY]) continue;
-                uint32_t *line = (uint32_t *)(dst + y * pitch);
+                uint32_t *line = (uint32_t *)(dst + y * scale * pitch);
                 for (int col = 0; col < 8; col++) {
                     int x = tile->x + col + dx;
                     unsigned color = tile->pixels[row * 8 + col];
                     if (!color || x < kNativeViewX ||
                         x >= kNativeViewX + DOOM_VIEW_WIDTH) continue;
-                    line[center + x] = DoomWeaponComposite(
-                        s.weapon_palette[y - kNativeViewY][tile->palette * 16 + color],
-                        line[center + x], s.weapon_translucent);
+                    for (unsigned sy = 0; sy < scale; sy++)
+                        for (unsigned sx = 0; sx < scale; sx++) {
+                            uint32_t *target = (uint32_t *)((uint8_t *)line + sy * pitch);
+                            unsigned px = (center + x) * scale + sx;
+                            target[px] = DoomWeaponComposite(
+                                s.weapon_palette[y - kNativeViewY][tile->palette * 16 + color],
+                                target[px], s.weapon_translucent);
+                        }
                 }
             }
         }
@@ -1181,14 +1219,19 @@ bool DoomRendererDrawWeapon(Ppu *ppu, uint8_t *dst, size_t pitch,
          * clipping. Horizontal sway and opacity remain safe in this fallback. */
         for (unsigned y = kNativeViewY; y < kNativeViewY + DOOM_VIEW_HEIGHT; y++) {
             if (!s.visible_rows[y - kNativeViewY]) continue;
-            uint32_t *line = (uint32_t *)(dst + y * pitch);
+            uint32_t *line = (uint32_t *)(dst + y * scale * pitch);
             for (int x = kNativeViewX; x < kNativeViewX + DOOM_VIEW_WIDTH; x++) {
                 int source_x = x - dx;
                 if (source_x < 0 || source_x >= 256) continue;
                 uint32_t weapon = s.weapon[y * kPpuBufWidth +
                                              kPpuExtraLeftRight + source_x];
-                if (weapon >> 24) line[center + x] = DoomWeaponComposite(
-                    weapon, line[center + x], s.weapon_translucent);
+                if (weapon >> 24)
+                    for (unsigned sy = 0; sy < scale; sy++)
+                        for (unsigned sx = 0; sx < scale; sx++) {
+                            uint32_t *target = (uint32_t *)((uint8_t *)line + sy * pitch);
+                            unsigned px = (center + x) * scale + sx;
+                            target[px] = DoomWeaponComposite(weapon, target[px], s.weapon_translucent);
+                        }
             }
         }
     }
@@ -1210,6 +1253,7 @@ void DoomRendererReset(void)
     memset(s.weapon, 0, sizeof(s.weapon));
     s.weapon_motion = (DoomWeaponMotion){0};
     s.weapon_tile_count = 0;
+    for (unsigned i = 0; i < 3; i++) memset(&s.resolution_scenes[i], 0, sizeof(s.resolution_scenes[i]));
     memset(s.visible_rows, 0, sizeof(s.visible_rows));
 }
 
@@ -1218,8 +1262,56 @@ void DoomRendererGetStats(DoomRendererStats *out)
     if (!out) return;
     *out = s.stats;
     out->weapon_tiles = s.weapon_tile_count;
+    out->resolution_scale = s.resolution_scale > 1 ? s.resolution_scale : 1;
+    out->resolution_segments = s.resolution_scenes[0].count;
     out->weapon_translucent = s.weapon_translucent;
     out->snapshot_interval = s.interval;
     out->supported = s.supported;
     out->has_snapshot = s.has_snapshot;
+}
+
+void DoomRendererSetResolution(unsigned scale)
+{
+    if (scale < 1 || scale > 4) scale = 1;
+    if (s.resolution_scale != scale) {
+        s.resolution_scale = scale;
+        s.cached = false;
+        s.has_snapshot = s.has_previous = s.has_presented = false;
+        for (unsigned i = 0; i < 3; i++) s.resolution_scenes[i].count = 0;
+    }
+}
+
+bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
+                                unsigned width, unsigned scale)
+{
+    if (!dst || scale < 2 || scale > 4 || width < 256 ||
+        width > 684 || pitch < width * scale * 4 || !s.cached ||
+        !s.resolution_scenes[0].count) return false;
+    bool wide = s.widescreen && width > 256;
+    if (wide && (!s.resolution_scenes[1].count || !s.resolution_scenes[2].count))
+        return false;
+    unsigned x0 = wide ? 20 : (width - 256) / 2 + 20;
+    unsigned x1 = wide ? width - 20 : x0 + 216;
+    for (unsigned x = x0 * scale; x < x1 * scale; x++) {
+        double rx = (x + 0.5) / scale - width / 2.0;
+        unsigned view = 0;
+        double yaw = 0;
+        if (rx < -108 || rx >= 108) {
+            view = rx < 0 ? 1 : 2;
+            yaw = rx < 0 ? -DOOM_SIDE_YAW : DOOM_SIDE_YAW;
+        }
+        double sx, sy;
+        DoomProjectRay(rx, 0, yaw, &sx, &sy);
+        double ratio = cos(yaw) + rx / DOOM_FOCAL * sin(yaw);
+        DoomResolutionScene *scene = &s.resolution_scenes[view];
+        if (!scene->count) return false;
+        double depths[144 * 4];
+        DoomResolutionRasterColumn(scene, s.snapshot.rom, s.snapshot.rom_size,
+            s.cached_camera.angle, rx, (sx - 108) / DOOM_FOCAL, ratio,
+            x, scale, dst, pitch, s.palettes, s.visible_rows, depths);
+        DoomResolutionSprites(scene, s.snapshot.rom, s.snapshot.rom_size,
+            (sx - 108) / DOOM_FOCAL, ratio, x, scale, dst, pitch,
+            s.palettes, s.visible_rows, depths);
+    }
+    return true;
 }

@@ -4,9 +4,10 @@
 A still in development, native PC port of SNES Doom! 
 With a bunch of quality of life improvements and much more to come!
 
+
 ## Display enhancements
 
-Open **Mods → Doom Display Enhancements** in the launcher. Both features
+Open **Mods → Doom Display Enhancements** in the launcher. All three features
 are disabled by default and can be enabled independently:
 
 - **Adaptive widescreen** renders additional world geometry at 4:3, 16:9,
@@ -16,8 +17,17 @@ are disabled by default and can be enabled independently:
   captured game states. Choose **Auto** to follow display refresh, or 60, 90, 120, 144,
   165, 240, or 360 presentations per second. The simulation and game speed
   remain unchanged. This works with widescreen disabled, too.
-- **Internal resolution scaling** Changes the internal resolution of the 3D graphics
-  to one of the many presets provided. Makes the viewing experience much more clear.
+- **Higher 3D resolution** offers 2x, 3x and 4x world rasterization. At 4:3,
+  the 3D viewport is 432x288, 648x432 or 864x576 respectively. Widescreen
+  increases its width further. Wall geometry and original wall textures are
+  sampled at the new resolution. Objects are sampled directly from their
+  original artwork at the selected
+  resolution, with filtering for distant objects. HUD and weapon artwork retain
+  their original pixel art. This works independently of the other display toggles.
+  Start with 2x; higher levels increase CPU cost. Disable the toggle to return
+  to native world rendering. Save data and gameplay speed are unaffected.
+
+See [resolution implementation and validation](tests/HIGHER_RESOLUTION.md).
 
 Use **Ctrl+L** to reopen the launcher during play. The framework saves the
 selected options in its normal mod state beside the executable. Presentation
