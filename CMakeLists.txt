@@ -46,6 +46,7 @@ add_executable(DoomSNESRecomp
     src/doom_renderer.c
     src/doom_presentation.c
     src/doom_debug.c
+    src/doom_input.c
 )
 
 # ROM identity. rom_identity.txt is the one place the digests live: the build
@@ -141,6 +142,21 @@ target_include_directories(DoomSNESRecomp PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(doom_input_test tests/test_doom_input.c)
+    target_include_directories(doom_input_test PRIVATE src)
+    if(NOT MSVC)
+        target_link_libraries(doom_input_test PRIVATE m)
+    endif()
+    add_test(NAME doom_input COMMAND doom_input_test)
+    add_executable(doom_input_adapter_test tests/test_doom_input_adapter.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_input_adapter_test PRIVATE src
+        ${SNESRECOMP_RUNNER_INCLUDE_DIRS} ${SNESRECOMP_ROOT}/runner/src/desktop)
+    snesrecomp_target_sdl(doom_input_adapter_test)
+    if(NOT MSVC)
+        target_link_libraries(doom_input_adapter_test PRIVATE m)
+    endif()
+    add_test(NAME doom_input_adapter COMMAND doom_input_adapter_test)
     add_executable(host_clock_test ${SNESRECOMP_ROOT}/tests/host/host_clock_test.c
         ${SNESRECOMP_ROOT}/runner/src/desktop/host_clock.c)
     target_include_directories(host_clock_test PRIVATE ${SNESRECOMP_ROOT}/runner/src/desktop)

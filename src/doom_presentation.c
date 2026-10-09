@@ -1,6 +1,7 @@
 #include "doom_presentation.h"
 #include "doom_renderer.h"
 #include "doom_video.h"
+#include "doom_input.h"
 
 #include "common_cpu_infra.h"
 #include "common_rtl.h"
@@ -50,6 +51,7 @@ void DoomPresentationReset(void) {
 }
 
 static void ConfigureRenderer(void) {
+    DoomRendererSetLook(DoomInputLookEnabled(), DoomInputPitch());
     DoomRendererSetResolution(settings.resolution_enabled ? settings.resolution_scale : 1);
     if (g_snes && g_snes->cart)
         DoomRendererConfigure(g_snes->cart->superfx, settings.widescreen,
@@ -120,10 +122,12 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
                DOOM_STOCK_WIDTH * 4);
     }
     float weight = (float)DoomPresentationAlpha(&settings, alpha);
-    bool world = (settings.widescreen || settings.fps_enabled || settings.resolution_enabled) &&
+    bool tilted = DoomInputLookEnabled() && DoomInputPitch() != 0;
+    bool world = (settings.widescreen || settings.fps_enabled || settings.resolution_enabled || tilted) &&
         DoomRendererDraw(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight);
     if (scale == 1) {
-        if (!world) DoomRendererDrawWeapon(g_ppu, dst, pitch, width, height, weight, false);
+        if (world && tilted) DoomRendererDrawResolution(dst, pitch, width, 1);
+        if (!world || DoomInputLookEnabled()) DoomRendererDrawWeapon(g_ppu, dst, pitch, width, height, weight, world);
     } else {
         for (int y = 0; y < height * (int)scale; y++) {
             uint32_t *row = (uint32_t *)(output + (size_t)y * output_pitch);
@@ -145,7 +149,7 @@ int DoomPresentationKeepDebt(void) {
     /* A costly camera pass may miss a deadline. Keep simulation on its
      * original clock and catch up through cached presents, as F-Zero does,
      * instead of permanently turning each missed deadline into slow motion. */
-    return settings.widescreen || settings.fps_enabled || settings.resolution_enabled;
+    return settings.widescreen || settings.fps_enabled || settings.resolution_enabled || DoomInputLookEnabled();
 }
 
 int DoomPresentationWindowWidth(int width) {

@@ -3,6 +3,7 @@ param(
   [string]$Rom = 'C:/Roms/Doom (USA).sfc',
   [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string]$RunLabel,
   [switch]$Enhancements,
+  [switch]$ModernControls,
   [ValidateSet(0,2,3,4)][int]$ResolutionScale = 0,
   [ValidateSet('Fit','4:3','16:9','21:9','32:9')][string]$Aspect = 'Fit',
   [switch]$WidescreenOnly,
@@ -28,10 +29,11 @@ Copy-Item (Join-Path $source 'DoomSNESRecomp.exe') $root
 Get-ChildItem $source -Filter '*.dll' | Copy-Item -Destination $root
 New-Item -ItemType Directory (Join-Path $root 'mods/preloaded') -Force | Out-Null
 Copy-Item (Join-Path $source 'mods/preloaded/packages') (Join-Path $root 'mods/preloaded') -Recurse
-if ($Enhancements -or $WidescreenOnly -or $InterpolationOnly -or $ResolutionScale) {
+if ($Enhancements -or $WidescreenOnly -or $InterpolationOnly -or $ResolutionScale -or $ModernControls) {
   $wide = if ($Enhancements -or $WidescreenOnly) { 'true' } else { 'false' }
   $resolution = if ($ResolutionScale) { 'true' } else { 'false' }
   $interpolate = if ($Enhancements -or $InterpolationOnly) { 'true' } else { 'false' }
+  $modern = if ($ModernControls) { 'true' } else { 'false' }
   $state = @"
 format_version = 1
 [[package]]
@@ -55,6 +57,10 @@ id = "render-resolution"
 enabled = $resolution
 [feature.values]
 scale = "$ResolutionScale"
+[[feature]]
+package_id = "doom.presentation"
+id = "modern-controls"
+enabled = $modern
 "@
   Set-Content (Join-Path $root 'mods/preloaded/state.toml') $state -Encoding ascii
 } else {

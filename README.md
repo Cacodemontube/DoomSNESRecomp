@@ -29,6 +29,38 @@ are disabled by default and can be enabled independently:
 
 See [resolution implementation and validation](tests/HIGHER_RESOLUTION.md).
 
+## Modern keyboard and mouse
+
+Enable **Mods → Doom Display Enhancements → Modern keyboard + mouse**.
+The option is off by default. Set player 1's input source to **Keyboard**.
+
+| Input | Action |
+| --- | --- |
+| W / S | Walk forward / backward |
+| A / D | Strafe left / right |
+| Shift | Run |
+| E | Open doors and use switches |
+| Enter | Pause / resume the game |
+| Mouse left / right | Turn, including while strafing |
+| Mouse up / down | Classic vertical look |
+| Left click | Fire |
+| Right click | Use |
+| Space | Cycle weapon |
+| Tab | Automap |
+| Home | Center the view |
+| Escape | Release the mouse; click to capture again |
+
+Arrow keys navigate the original menus; E confirms. Ctrl+L opens the launcher.
+Sensitivity, invert-Y and the vertical-look toggle are in the same feature.
+Mouse capture releases when focus is lost or a host panel opens.
+
+Horizontal turning uses the original SNES mouse conversion as its base.
+Vertical look shifts the rendered horizon in the style of classic FPS games.
+The HUD and weapon stay fixed, and shooting retains SNES Doom's auto-aim.
+It works at native resolution, higher resolutions and widescreen. Vertical
+look uses the host world rasterizer and adds some rendering cost.
+See [implementation and validation](tests/MODERN_CONTROLS.md).
+
 Use **Ctrl+L** to reopen the launcher during play. The framework saves the
 selected options in its normal mod state beside the executable. Presentation
 rates are targets; actual throughput depends on the cost of rendering the

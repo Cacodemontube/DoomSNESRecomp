@@ -102,6 +102,8 @@ typedef struct RenderState {
     bool workers_unavailable;
 #endif
     unsigned resolution_scale;
+    bool look_enabled;
+    double horizon_offset;
     DoomResolutionScene resolution_scenes[3];
     uint8_t pictures[3][DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
     /* Sector texture pointers identify solid floors/ceilings; the two sky
@@ -205,7 +207,7 @@ static void Capture(SuperFx *fx, uint32_t pc, void *context)
 {
     (void)pc;
     (void)context;
-    if (!(s.widescreen || s.interpolation || s.resolution_scale > 1) || !s.ram ||
+    if (!(s.widescreen || s.interpolation || s.resolution_scale > 1 || s.look_enabled) || !s.ram ||
         ReadWord(fx->ram, kAutoMap) != 0)
         return;
 
@@ -301,7 +303,7 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
     s.interpolation = interpolation;
     s.configured_width = width;
 
-    if (!s.supported || !(widescreen || interpolation || s.resolution_scale > 1)) {
+    if (!s.supported || !(widescreen || interpolation || s.resolution_scale > 1 || s.look_enabled)) {
         if (s.hook_installed) {
             superfx_set_pc_hook(fx, kBsp, NULL, NULL);
             s.hook_installed = false;
@@ -337,7 +339,7 @@ static bool WeaponGameplay(const Ppu *ppu)
 static bool Gameplay(const Ppu *ppu)
 {
     return ppu && s.fx && s.has_snapshot && s.supported &&
-        (s.widescreen || s.interpolation || s.resolution_scale > 1) &&
+        (s.widescreen || s.interpolation || s.resolution_scale > 1 || s.look_enabled) &&
         /* Capture runs inside the next native field, before PreparePpu and
          * EndSimFrame publish it. That pending field is fresh, not unsigned
          * history-age underflow. Other future or old snapshots stay invalid. */
@@ -684,7 +686,7 @@ static void ExecuteRenderJob(RenderJob *job)
     const Camera camera = job->camera;
     const double fraction = job->fraction;
     const int yaw = job->yaw;
-    if (s.resolution_scale > 1) {
+    if (s.resolution_scale > 1 || s.look_enabled) {
         unsigned view = job->picture == s.pictures[0] ? 0 :
                         job->picture == s.pictures[1] ? 1 : 2;
         job->resolution_scene = &s.resolution_scenes[view];
@@ -1161,7 +1163,7 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
             line[x] = s.palettes[y][color];
         }
     }
-    if (s.resolution_scale <= 1)
+    if (s.resolution_scale <= 1 && !s.look_enabled)
         DoomRendererDrawWeapon(ppu, dst, pitch, width, height, alpha, true);
     return true;
 }
@@ -1281,10 +1283,20 @@ void DoomRendererSetResolution(unsigned scale)
     }
 }
 
+void DoomRendererSetLook(bool enabled, double horizon_offset)
+{
+    if (s.look_enabled != enabled) {
+        s.cached = false;
+        s.has_snapshot = s.has_previous = s.has_presented = false;
+    }
+    s.look_enabled = enabled;
+    s.horizon_offset = enabled ? fmax(-42, fmin(42, horizon_offset)) : 0;
+}
+
 bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
                                 unsigned width, unsigned scale)
 {
-    if (!dst || scale < 2 || scale > 4 || width < 256 ||
+    if (!dst || scale < 1 || scale > 4 || width < 256 ||
         width > 684 || pitch < width * scale * 4 || !s.cached ||
         !s.resolution_scenes[0].count) return false;
     bool wide = s.widescreen && width > 256;
@@ -1305,6 +1317,7 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
         double ratio = cos(yaw) + rx / DOOM_FOCAL * sin(yaw);
         DoomResolutionScene *scene = &s.resolution_scenes[view];
         if (!scene->count) return false;
+        scene->horizon_offset = s.horizon_offset;
         double depths[144 * 4];
         DoomResolutionRasterColumn(scene, s.snapshot.rom, s.snapshot.rom_size,
             s.cached_camera.angle, rx, (sx - 108) / DOOM_FOCAL, ratio,

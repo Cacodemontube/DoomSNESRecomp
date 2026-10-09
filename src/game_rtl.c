@@ -35,6 +35,7 @@
 #include "game_rtl.h"
 #include "doom_presentation.h"
 #include "doom_renderer.h"
+#include "doom_input.h"
 
 #include "beam_frame_driver.h"
 
@@ -55,6 +56,7 @@ void GameSessionReset(void)
      * been fine" is the usual desync culprit, because single-player never
      * re-enters the boot path twice in one process. */
     snes_beam_frame_driver_reset();
+    DoomInputReset();
     DoomPresentationReset();
 }
 

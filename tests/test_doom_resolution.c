@@ -53,7 +53,9 @@ int main(void) {
     CHECK(DoomResolutionHits(scene,0,1,hits)==1);
     CHECK(fabs(hits[0].depth-160)<1e-9);
     unsigned changed=0;
-    for(unsigned scale=2;scale<=4;scale++) {
+    for(int look=-42;look<=42;look+=42) {
+    scene->horizon_offset=look;
+    for(unsigned scale=1;scale<=4;scale++) {
         unsigned width=256*scale,height=224*scale,stride=width+7;
         uint32_t *out=malloc(stride*height*4);CHECK(out);
         for(unsigned i=0;i<stride*height;i++)out[i]=0xa5a5a5a5;
@@ -69,6 +71,8 @@ int main(void) {
             if(out[y*stride+x]!=out[(y/scale*scale)*stride+(x/scale*scale)])changed++;
         free(out);
     }
+    }
+    scene->horizon_offset=0;
     CHECK(changed>500);
     /* Native texture offsets crossing a repeat must not interpolate halfway
      * through the texture. Both endpoints describe the same wrapped phase. */

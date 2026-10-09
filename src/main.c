@@ -29,6 +29,7 @@
 #include "game_rtl.h"
 #include "doom_presentation.h"
 #include "doom_debug.h"
+#include "doom_input.h"
 #include "snesrecomp_rom_identity.h"  /* generated from rom_identity.txt */
 
 #ifndef __ANDROID__
@@ -48,6 +49,10 @@ static void EndFrame(const uint8_t *field, unsigned number) {
     DoomPresentationEnd(field, number);
     DoomDebugRecordFrame(number);
 }
+
+static void Reset(void) { DoomInputReset(); DoomPresentationReset(); }
+static void Shutdown(void) { DoomInputShutdown(); DoomPresentationReset(); }
+static void BeforeFrame(void) { DoomInputBeforeFrame(); DoomPresentationBeforeFrame(); }
 
 static int DrawFrame(uint8_t *dst, size_t pitch, const uint8_t *field,
                      int width, int height, double alpha) {
@@ -77,9 +82,9 @@ static const SnesDesktopHostGame kGameHost = {
      * title without one. The path is exe-relative. */
     .sram_path           = "saves/save.srm",
     .in_game_launcher    = 1,
-    .on_reset            = DoomPresentationReset,
-    .on_shutdown         = DoomPresentationReset,
-    .before_run_frame    = DoomPresentationBeforeFrame,
+    .on_reset            = Reset,
+    .on_shutdown         = Shutdown,
+    .before_run_frame    = BeforeFrame,
     .prepare_frame       = DoomPresentationPrepare,
     .begin_sim_frame     = DoomPresentationBegin,
     .end_sim_frame       = EndFrame,
@@ -88,6 +93,9 @@ static const SnesDesktopHostGame kGameHost = {
     .keep_pacing_debt    = DoomPresentationKeepDebt,
     .window_base_width   = DoomPresentationWindowWidth,
     .compute_viewport    = DoomPresentationViewport,
+    .keyboard_input      = DoomInputKeyboard,
+    .input_event         = DoomInputEvent,
+    .input_suspended     = DoomInputSuspended,
 };
 
 #ifndef __ANDROID__

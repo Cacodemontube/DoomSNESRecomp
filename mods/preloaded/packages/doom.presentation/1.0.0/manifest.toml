@@ -3,7 +3,7 @@ id = "doom.presentation"
 version = "1.0.0"
 name = "Doom Display Enhancements"
 author = "DoomSNESRecomp contributors"
-description = "Adaptive widescreen and interpolated camera and weapon presentation."
+description = "Display enhancements and optional modern keyboard and mouse controls."
 license = "PolyForm-Noncommercial-1.0.0"
 resolver = "declarative"
 save_compatibility = "shared"
@@ -132,3 +132,60 @@ label = "3x (648 x 432 at 4:3)"
 [[option.choice]]
 value = "4"
 label = "4x (864 x 576 at 4:3)"
+
+[[feature]]
+id = "modern-controls"
+name = "Modern keyboard + mouse"
+description = "W/S move, A/D strafe, Shift runs, E uses doors/switches, Enter pauses. Left mouse fires; mouse turns and shifts the horizon for classic vertical look. Escape releases the cursor; click to capture it again."
+group = "Controls"
+default_enabled = false
+presentation_only = false
+
+[[plugin]]
+feature = "modern-controls"
+id = "doom.controls.modern"
+
+[[option]]
+feature = "modern-controls"
+id = "sensitivity"
+label = "Mouse sensitivity"
+type = "choice"
+default = "1"
+[[option.choice]]
+value = "0.5"
+label = "0.5x"
+[[option.choice]]
+value = "1"
+label = "1x (SNES mouse scale)"
+[[option.choice]]
+value = "1.5"
+label = "1.5x"
+[[option.choice]]
+value = "2"
+label = "2x"
+
+[[option]]
+feature = "modern-controls"
+id = "vertical-look"
+label = "Classic vertical look"
+type = "choice"
+default = "on"
+[[option.choice]]
+value = "on"
+label = "On"
+[[option.choice]]
+value = "off"
+label = "Off (horizontal mouse only)"
+
+[[option]]
+feature = "modern-controls"
+id = "invert-y"
+label = "Invert mouse Y"
+type = "choice"
+default = "off"
+[[option.choice]]
+value = "off"
+label = "Off"
+[[option.choice]]
+value = "on"
+label = "On"

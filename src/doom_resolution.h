@@ -41,6 +41,7 @@ typedef struct DoomResolutionScene {
     DoomResolutionSprite sprites[28];
     uint8_t sectors[205 * 14];
     int view_z;
+    double horizon_offset; /* Build-style vertical shear, in native world rows. */
     unsigned light_adjust;
     bool invulnerable, sky2;
     DoomResolutionColumn columns[256];
@@ -184,10 +185,11 @@ static inline void DoomResolutionPlane(DoomResolutionScene *scene,
         unsigned color;
         double plane_depth = INFINITY;
         if (ceiling && (sector[0] & 0x80)) {
+            int sky_y = (int)floor((y + 0.5) / scale - scene->horizon_offset);
             color = rom[DoomSkyRomOffset((uint16_t)angle,
-                (int)floor(rx + 108), native_y, scene->sky2)];
+                (int)floor(rx + 108), (unsigned)sky_y, scene->sky2)];
         } else {
-            double sy = ((y + 0.5) / scale - 72);
+            double sy = ((y + 0.5) / scale - 72 - scene->horizon_offset);
             double depth = fabs(sy) > 1e-9 ? fabs(height * DOOM_FOCAL / sy) : 7168;
             plane_depth = depth;
             unsigned row = DoomResolutionLight(scene, sector, depth, true);
@@ -244,11 +246,11 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
     for (int y = from; y < to; y++) {
         unsigned native_y = (unsigned)y / scale;
         if (!visible[native_y]) continue;
-        double world_z = scene->view_z + (72 - (y + 0.5) / scale) * depth / DOOM_FOCAL;
+        double world_z = scene->view_z + (72 + scene->horizon_offset - (y + 0.5) / scale) * depth / DOOM_FOCAL;
         double origin = seg->texture_h[component] & 1
             ? DoomResolutionSigned(sector + 4) : bottom_height;
         double texture_v = native_uv
-            ? centre_v + (71.5 - (y + 0.5) / scale) * native_step
+            ? centre_v + (71.5 + scene->horizon_offset - (y + 0.5) / scale) * native_step
             : world_z - origin - seg->offset_y;
         unsigned v = (unsigned)(int)floor(texture_v) & (h - 1);
         unsigned color = rom[0x1cde00 + (scene->invulnerable ? 32 : row) * 256 + column[v]];
@@ -258,8 +260,8 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
     }
 }
 static inline int DoomResolutionClipY(double height, double depth,
-    unsigned scale, int min, int max) {
-    double y = ceil((72 - height * DOOM_FOCAL / depth) * scale - 0.5);
+    unsigned scale, int min, int max, double horizon_offset) {
+    double y = ceil((72 + horizon_offset - height * DOOM_FOCAL / depth) * scale - 0.5);
     if (y <= min) return min;
     if (y >= max) return max;
     return (int)y;
@@ -278,8 +280,8 @@ static inline void DoomResolutionRasterColumn(DoomResolutionScene *scene,
         const uint8_t *near = scene->sectors + seg->near_sector * 14;
         int floor_z = DoomResolutionSigned(near + 2), ceiling_z = DoomResolutionSigned(near + 4);
         double depth = hits[i].depth;
-        int cy = DoomResolutionClipY(ceiling_z - scene->view_z, depth, scale, top, bottom);
-        int fy = DoomResolutionClipY(floor_z - scene->view_z, depth, scale, top, bottom);
+        int cy = DoomResolutionClipY(ceiling_z - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
+        int fy = DoomResolutionClipY(floor_z - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
         DoomResolutionPlane(scene, rom, seg->near_sector, true, angle, rx, x,
             top, cy, scale, dst, pitch, palettes, visible, depths);
         DoomResolutionPlane(scene, rom, seg->near_sector, false, angle, rx, x,
@@ -294,13 +296,13 @@ static inline void DoomResolutionRasterColumn(DoomResolutionScene *scene,
         const uint8_t *far = scene->sectors + seg->far_sector * 14;
         int far_floor = DoomResolutionSigned(far + 2), far_ceiling = DoomResolutionSigned(far + 4);
         if (far_ceiling < ceiling_z) {
-            int end = DoomResolutionClipY(far_ceiling - scene->view_z, depth, scale, top, bottom);
+            int end = DoomResolutionClipY(far_ceiling - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
             if (seg->flags & 2) DoomResolutionWall(scene, rom, rom_size, seg, 0,
                 source_ray, depth, ceiling_z, x, top, end, scale, dst, pitch, palettes, visible, depths);
             top = end;
         }
         if (far_floor > floor_z) {
-            int start = DoomResolutionClipY(far_floor - scene->view_z, depth, scale, top, bottom);
+            int start = DoomResolutionClipY(far_floor - scene->view_z, depth, scale, top, bottom, scene->horizon_offset);
             if (seg->flags & 4) DoomResolutionWall(scene, rom, rom_size, seg, 1,
                 source_ray, depth, far_floor, x, start, bottom, scale, dst, pitch, palettes, visible, depths);
             bottom = start;
@@ -423,14 +425,14 @@ static inline void DoomResolutionSprites(DoomResolutionScene *scene,
         double spread=footprint>1 ? footprint/4 : 0;
         if(u<-spread || u>=sprite->width+spread)continue;
         double depth=sprite->depth/ratio;
-        double top=(72-(sprite->bottom+sprite->height)*DOOM_FOCAL/depth)*scale;
-        double bottom=(72-sprite->bottom*DOOM_FOCAL/depth)*scale;
+        double top=(72+scene->horizon_offset-(sprite->bottom+sprite->height)*DOOM_FOCAL/depth)*scale;
+        double bottom=(72+scene->horizon_offset-sprite->bottom*DOOM_FOCAL/depth)*scale;
         int first=(int)fmax(0,fmin(144*scale,ceil(top-0.5)));
         int last=(int)fmax(0,fmin(144*scale,ceil(bottom-0.5)));
         for(int y=first;y<last;y++) {
             unsigned ny=y/scale;
             if(!visible[ny] || depth>depths[y]+0.001)continue;
-            double v=(71.5-(y+0.5)/scale)*depth/DOOM_FOCAL-sprite->bottom;
+            double v=(71.5+scene->horizon_offset-(y+0.5)/scale)*depth/DOOM_FOCAL-sprite->bottom;
             uint32_t *target=&((uint32_t*)(dst+(size_t)(y+23*scale)*pitch))[x];
             unsigned red=0,green=0,blue=0,covered=0;
             unsigned taps=spread>0 ? 4 : 1;

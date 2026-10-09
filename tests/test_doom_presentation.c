@@ -40,6 +40,10 @@ static unsigned configured_width, ended_number;
 static float drawn_alpha;
 static SNESModActivationCallback plugin_callbacks[3], reset_callback;
 
+int DoomInputLookEnabled(void) { return 0; }
+double DoomInputPitch(void) { return 0; }
+void DoomRendererSetLook(bool enabled, double offset) { CHECK(!enabled && offset == 0); }
+
 /* Exercise the production adapter against the actual framework contracts.
  * The runtime itself is replaced only at its public query/registration API. */
 int snes_mod_register_presentation_plugin(const char *id,

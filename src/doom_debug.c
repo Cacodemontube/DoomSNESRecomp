@@ -1,6 +1,7 @@
 #include "doom_debug.h"
 #if SNESRECOMP_TRACE
 #include "doom_renderer.h"
+#include "doom_input.h"
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
 #include "snes/cart.h"
@@ -16,6 +17,8 @@ static DoomRendererStats stats;
 static unsigned frame;
 static unsigned p1, p2, invisibility_ticks;
 static int requested_invisibility_ticks = -1;
+static int requested_motion, motion_x, motion_y;
+static DoomInputStats input_stats;
 static unsigned long long draws;
 static double draw_total_ms, draw_max_ms;
 #if SNESRECOMP_SDL3
@@ -32,7 +35,10 @@ void DoomDebugRecordFrame(unsigned number) {
     LOCK();
     int request = requested_invisibility_ticks;
     requested_invisibility_ticks = -1;
+    int mouse_request = requested_motion, dx = motion_x, dy = motion_y;
+    requested_motion = 0;
     UNLOCK();
+    if (mouse_request) DoomInputMotion(dx, dy);
     SuperFx *fx = g_snes && g_snes->cart ? g_snes->cart->superfx : NULL;
     if (request >= 0 && fx && fx->ram && fx->ram_size > 0x1eb &&
         g_snes->ram && (g_snes->ram[0x2c] & 0x40)) {
@@ -43,8 +49,11 @@ void DoomDebugRecordFrame(unsigned number) {
         ? fx->ram[0x1ea] | ((unsigned)fx->ram[0x1eb] << 8) : 0;
     DoomRendererStats snapshot;
     DoomRendererGetStats(&snapshot);
+    DoomInputStats input_snapshot;
+    DoomInputGetStats(&input_snapshot);
     LOCK();
     stats = snapshot;
+    input_stats = input_snapshot;
     frame = number;
     invisibility_ticks = ticks;
     p1 = g_snes ? g_snes->input1_currentState : 0;
@@ -64,6 +73,32 @@ void DoomDebugRecordDraw(double milliseconds) {
 }
 
 static int Command(const char *cmd, const char *args, DebugServerGameSendLine send) {
+    if (!strcmp(cmd, "mouse_motion_test")) {
+        int dx, dy; char extra;
+        if (sscanf(args, "%d %d %c", &dx, &dy, &extra) != 2 ||
+            dx < -256 || dx > 256 || dy < -256 || dy > 256) {
+            send("{\"ok\":false,\"error\":\"usage: mouse_motion_test <x -256..256> <y -256..256>\"}");
+            return 1;
+        }
+        LOCK();
+        int ready = input_stats.enabled && input_stats.gameplay;
+        if (ready) { motion_x = dx; motion_y = dy; requested_motion = 1; }
+        UNLOCK();
+        send(ready ? "{\"ok\":true,\"queued\":true}" :
+            "{\"ok\":false,\"error\":\"modern controls must be enabled during gameplay\"}");
+        return 1;
+    }
+    if (!strcmp(cmd, "input_stats")) {
+        char json[512];
+        LOCK();
+        snprintf(json, sizeof(json),
+            "{\"ok\":true,\"frame\":%u,\"enabled\":%s,\"gameplay\":%s,\"captured\":%s,"
+            "\"movement_updates\":%u,\"mouse_turns\":%u,\"horizon_offset\":%.3f}",
+            frame, input_stats.enabled ? "true" : "false", input_stats.gameplay ? "true" : "false",
+            input_stats.captured ? "true" : "false", input_stats.movement_updates,
+            input_stats.turns, input_stats.pitch);
+        UNLOCK(); send(json); return 1;
+    }
     if (!strcmp(cmd, "weapon_invisibility_test")) {
         unsigned ticks;
         char extra;
