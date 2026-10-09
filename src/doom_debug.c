@@ -2,6 +2,7 @@
 #if SNESRECOMP_TRACE
 #include "doom_renderer.h"
 #include "doom_input.h"
+#include "doom_cheats.h"
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
 #include "snes/cart.h"
@@ -20,6 +21,9 @@ static int requested_invisibility_ticks = -1;
 static int requested_motion, motion_x, motion_y;
 static int requested_key;
 static DoomInputStats input_stats;
+static DoomCheatsStats cheat_stats;
+static char requested_cheat[9];
+static int requested_level_exit;
 static unsigned long long draws;
 static double draw_total_ms, draw_max_ms;
 #if SNESRECOMP_SDL3
@@ -39,7 +43,11 @@ void DoomDebugRecordFrame(unsigned number) {
     int mouse_request = requested_motion, dx = motion_x, dy = motion_y;
     requested_motion = 0;
     int key_request=requested_key;requested_key=0;
+    char cheat_request[9];memcpy(cheat_request,requested_cheat,9);requested_cheat[0]=0;
+    int level_exit=requested_level_exit;requested_level_exit=0;
     UNLOCK();
+    if(cheat_request[0])DoomCheatsTestText(cheat_request);
+    if(level_exit)DoomCheatsTestExit();
     if (mouse_request) DoomInputMotion(dx, dy);
     if(key_request) {
         if(key_request==SDLK_SPACE)DoomInputRequestJump();
@@ -57,9 +65,11 @@ void DoomDebugRecordFrame(unsigned number) {
     DoomRendererGetStats(&snapshot);
     DoomInputStats input_snapshot;
     DoomInputGetStats(&input_snapshot);
+    DoomCheatsStats cheat_snapshot;DoomCheatsGetStats(&cheat_snapshot);
     LOCK();
     stats = snapshot;
     input_stats = input_snapshot;
+    cheat_stats=cheat_snapshot;
     frame = number;
     invisibility_ticks = ticks;
     p1 = g_snes ? g_snes->input1_currentState : 0;
@@ -79,6 +89,26 @@ void DoomDebugRecordDraw(double milliseconds) {
 }
 
 static int Command(const char *cmd, const char *args, DebugServerGameSendLine send) {
+    if(!strcmp(cmd,"cheat_exit_test")) {
+        LOCK();int ready=cheat_stats.enabled && cheat_stats.ready;
+        if(ready)requested_level_exit=1;UNLOCK();
+        send(ready?"{\"ok\":true,\"queued\":true}":"{\"ok\":false,\"error\":\"gameplay required\"}");return 1;
+    }
+    if(!strcmp(cmd,"cheat_test")) {
+        size_t n=strlen(args);int valid=n>=4 && n<=8;
+        for(size_t i=0;i<n;i++)if(!((args[i]>='A' && args[i]<='Z') ||
+            (args[i]>='a' && args[i]<='z') || (args[i]>='0' && args[i]<='9')))valid=0;
+        LOCK();int ready=cheat_stats.enabled && cheat_stats.ready;
+        if(valid && ready)memcpy(requested_cheat,args,n+1);UNLOCK();
+        send(valid && ready?"{\"ok\":true,\"queued\":true}":"{\"ok\":false,\"error\":\"cheat_test requires enabled cheats and gameplay\"}");
+        return 1;
+    }
+    if(!strcmp(cmd,"cheat_stats")) {
+        char json[512];LOCK();DoomCheatsStats s=cheat_stats;unsigned f=frame;UNLOCK();
+        snprintf(json,sizeof(json),"{\"ok\":true,\"frame\":%u,\"enabled\":%d,\"ready\":%d,\"god\":%d,\"clip\":%d,\"map\":%d,\"health\":%d,\"armor\":%d,\"keys\":%d,\"arms\":%d,\"face\":%d,\"skill\":%d,\"level\":%d,\"x\":%d,\"y\":%d,\"ammo\":[%d,%d,%d,%d],\"monster_arrows\":%u}",
+            f,s.enabled,s.ready,s.god,s.clip,s.map,s.health,s.armor,s.keys,s.arms,s.face,s.skill,s.level,s.x,s.y,s.ammo[0],s.ammo[1],s.ammo[2],s.ammo[3],s.monster_arrows);
+        send(json);return 1;
+    }
     if(!strcmp(cmd,"modern_key_test")) {
         int key=!strcmp(args,"space") ? SDLK_SPACE :
             strlen(args)==1 && args[0]>='1' && args[0]<='7' ? args[0] : 0;

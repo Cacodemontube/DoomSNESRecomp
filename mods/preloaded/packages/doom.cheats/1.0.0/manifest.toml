@@ -1,0 +1,25 @@
+format_version = 1
+id = "doom.cheats"
+version = "1.0.0"
+name = "Doom PC Keyboard Cheats"
+author = "DoomSNESRecomp contributors"
+description = "Type classic PC Doom cheats during gameplay: IDDQD, IDKFA, IDFA, IDCLIP, IDDT and IDCLEV followed by episode and mission."
+license = "PolyForm-Noncommercial-1.0.0"
+resolver = "declarative"
+save_compatibility = "shared"
+
+[[target]]
+game_id = "doom-y"
+rom_sha256 = "d45e26eb10c323ecd480e5f2326b223e29264c3adde67f48f0d2791128e519e8"
+
+[[feature]]
+id = "keyboard-cheats"
+name = "PC keyboard cheats"
+description = "Enable keyboard cheat codes. IDDQD toggles god mode and grants 100% health; IDKFA/IDFA grant weapons, ammo and 200% armor; IDCLIP toggles wall noclip; IDDT cycles full map, monster arrows and normal map; IDCLEVxy warps to an available SNES level with pistol start at your current difficulty."
+group = "Gameplay"
+default_enabled = false
+presentation_only = false
+
+[[plugin]]
+feature = "keyboard-cheats"
+id = "doom.cheats.keyboard"

@@ -47,6 +47,7 @@ add_executable(DoomSNESRecomp
     src/doom_presentation.c
     src/doom_debug.c
     src/doom_input.c
+    src/doom_cheats.c
 )
 
 # ROM identity. rom_identity.txt is the one place the digests live: the build
@@ -142,6 +143,12 @@ target_include_directories(DoomSNESRecomp PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(doom_cheats_test tests/test_doom_cheats.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_cheats_test PRIVATE src
+        ${SNESRECOMP_RUNNER_INCLUDE_DIRS} ${SNESRECOMP_ROOT}/runner/src/desktop)
+    snesrecomp_target_sdl(doom_cheats_test)
+    add_test(NAME doom_cheats COMMAND doom_cheats_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
     add_executable(doom_input_test tests/test_doom_input.c)
     target_include_directories(doom_input_test PRIVATE src)
     if(NOT MSVC)

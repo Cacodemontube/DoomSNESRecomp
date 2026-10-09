@@ -36,6 +36,7 @@
 #include "doom_presentation.h"
 #include "doom_renderer.h"
 #include "doom_input.h"
+#include "doom_cheats.h"
 
 #include "beam_frame_driver.h"
 
@@ -57,6 +58,7 @@ void GameSessionReset(void)
      * re-enters the boot path twice in one process. */
     snes_beam_frame_driver_reset();
     DoomInputReset();
+    DoomCheatsReset();
     DoomPresentationReset();
 }
 

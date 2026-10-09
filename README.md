@@ -29,6 +29,28 @@ are disabled by default and can be enabled independently:
 
 See [resolution implementation and validation](tests/HIGHER_RESOLUTION.md).
 
+## PC keyboard cheats
+
+Enable **Mods → Doom PC Keyboard Cheats → PC keyboard cheats**. It is off
+by default and works with either the original controls or modern controls.
+Type the codes directly during gameplay; no console is needed.
+
+| Code | Effect |
+| --- | --- |
+| `IDDQD` | Toggle god mode with the glowing-eye face. Enabling sets health to 100%; disabling keeps your current health. |
+| `IDKFA` | All weapons, full ammo, 200% armor, and all keys. |
+| `IDFA` | All weapons, full ammo, and 200% armor; existing keys are retained. |
+| `IDCLIP` | Toggle wall noclip. |
+| `IDDT` | Cycle full map, full map with living monsters as green arrows, and normal map. |
+| `IDCLEVxy` | Warp to episode `x`, mission `y`, with a black-screen transition and pistol start at the current difficulty. |
+
+Available warp destinations are E1M1–5, E1M7–9; E2M1, E2M3–4, E2M6,
+E2M8–9; and E3M1–4, E3M6–9. Missing SNES levels are rejected. Exiting a
+warped level follows the game's normal progression and secret-exit rules.
+Disabling the mod also disables god mode and noclip. Granted inventory stays.
+Typing is ignored while a host panel is open or the game is unfocused.
+See [cheat validation](tests/CHEATS.md).
+
 ## Modern keyboard and mouse
 
 Enable **Mods → Doom Display Enhancements → Modern keyboard + mouse**.
