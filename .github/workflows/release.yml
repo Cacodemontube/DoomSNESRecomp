@@ -65,6 +65,7 @@ jobs:
           msystem: ${{ matrix.msystem }}
           update: true
           install: >-
+            git
             ${{ matrix.prefix }}-gcc
             ${{ matrix.prefix }}-cmake
             ${{ matrix.prefix }}-ninja
