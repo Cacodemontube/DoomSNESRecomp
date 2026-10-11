@@ -10,7 +10,7 @@ on:
         description: SHA256 of the temporary generated build input archive
         required: true
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     strategy:
