@@ -84,7 +84,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libgl1-mesa-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libasound2-dev libpulse-dev libudev-dev libwayland-dev libxkbcommon-dev
+          sudo apt-get install -y ninja-build libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libasound2-dev libpulse-dev libudev-dev libwayland-dev libxkbcommon-dev libdecor-0-dev libdrm-dev libgbm-dev
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         run: brew install ninja dylibbundler
