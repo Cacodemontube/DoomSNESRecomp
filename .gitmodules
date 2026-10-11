@@ -4,5 +4,5 @@
 	branch = doom-presentation-fixes
 [submodule "recomp-ui"]
 	path = recomp-ui
-	url = https://github.com/mstan/recomp-ui.git
-	branch = master
+	url = https://github.com/Cacodemontube/recomp-ui.git
+	branch = doom-v002

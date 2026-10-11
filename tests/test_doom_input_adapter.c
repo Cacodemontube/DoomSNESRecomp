@@ -27,7 +27,7 @@ static int TestCapture(SDL_bool on) { if(on)captures++;else releases++;return 0;
 #define CHECK(x) do { if(!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while(0)
 Snes *g_snes;
 static int selected;
-static const char *invert="off", *look="on";
+static const char *invert="off", *look="off", *jump="off";
 int snes_mod_runtime_feature_enabled_c(const char *package,const char *feature) {
     CHECK(!strcmp(package,"doom.presentation")&&!strcmp(feature,"modern-controls"));
     return selected;
@@ -35,7 +35,7 @@ int snes_mod_runtime_feature_enabled_c(const char *package,const char *feature) 
 int snes_mod_runtime_feature_option_value_c(const char *package,const char *feature,
     const char *option,char *out,uint32_t size) {
     (void)package;(void)feature;
-    const char *value=!strcmp(option,"invert-y")?invert:!strcmp(option,"vertical-look")?look:"1";
+    const char *value=!strcmp(option,"invert-y")?invert:!strcmp(option,"vertical-look")?look:!strcmp(option,"jumping")?jump:"1";
     CHECK(size>strlen(value));strcpy(out,value);return 1;
 }
 int snes_mod_register_activation_plugin(const char *id,SNESModActivationCallback cb) {
@@ -49,6 +49,9 @@ static void Move(SuperFx *fx) {
     CHECK(!superfx_is_running(fx));
 }
 int main(void) {
+    selected=1;ReadSettings();
+    CHECK(!look_enabled && !jump_enabled);
+    look="on";selected=0;
     SDL_Event pause={0};pause.type=SDL_KEYDOWN;
 #if SNESRECOMP_SDL3
     pause.key.key=SDLK_p;
@@ -57,6 +60,21 @@ int main(void) {
 #endif
     CHECK(DoomInputEvent(&pause));
     pause.type=SDL_KEYUP;CHECK(DoomInputEvent(&pause));
+    SDL_Event renderer={0};renderer.type=SDL_KEYDOWN;
+#if SNESRECOMP_SDL3
+    renderer.key.key=SDLK_r;
+#else
+    renderer.key.keysym.sym=SDLK_r;
+#endif
+    CHECK(DoomInputEvent(&renderer));
+    renderer.type=SDL_KEYUP;CHECK(DoomInputEvent(&renderer));
+#if SNESRECOMP_SDL3
+    renderer.key.mod=KMOD_CTRL;
+#else
+    renderer.key.keysym.mod=KMOD_CTRL;
+#endif
+    renderer.type=SDL_KEYDOWN;CHECK(!DoomInputEvent(&renderer));
+    renderer.type=SDL_KEYUP;CHECK(!DoomInputEvent(&renderer));
     uint8_t *rom=calloc(1,0x200000),*ram=calloc(1,0x10000);CHECK(rom&&ram);
     const uint8_t entry[]={0x29,0x10,0xa1,0x20,0x71,0x09,0x07,0x01};
     const uint8_t load[]={0xa0,0x14,0x3d,0xa1,0xc6,0x51,0x40,0x56,0x3f,0x71,0x90};
@@ -113,6 +131,10 @@ int main(void) {
     CHECK(DoomInputAuxiliary(0,0x210)==0x10); /* modern cycle suppressed */
     uint8_t jumping[SDL_SCANCODE_COUNT]={0};jumping[SDL_SCANCODE_SPACE]=1;
     ram[0x5a8e + 36]=128;ram[0x5a8e + 37]=0;
+    DoomInputKeyboard(jumping,0,0);Move(fx);
+    CHECK(!jump_active && !jump_queued && !DoomInputRequestJump());
+    jumping[SDL_SCANCODE_SPACE]=0;DoomInputKeyboard(jumping,0,0);
+    jump="on";jumping[SDL_SCANCODE_SPACE]=1;
     CHECK(!(DoomInputKeyboard(jumping,0,0)&(1u<<9)));Move(fx);CHECK(jump_active);
     int peak=0;
     for(unsigned tick=0;tick<60 && jump_active;tick++) {

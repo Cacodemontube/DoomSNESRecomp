@@ -24,6 +24,10 @@ int main(void) {
     word(ram+0x4004,192);word(ram+0x4006,96);
     CHECK(DoomResolutionCapture(scene,ram,0x10000,0,rom,0x200000));
     CHECK(scene->count==1 && scene->segments[0].x1==-96);
+    word(ram+0x7a,2);
+    CHECK(DoomResolutionCapture(scene,ram,0x10000,0,rom,0x200000) && scene->sky2);
+    word(ram+0x7a,0);
+    CHECK(DoomResolutionCapture(scene,ram,0x10000,0,rom,0x200000) && !scene->sky2);
     CHECK(scene->segments[0].z1==132 && scene->segments[0].z2==196);
     CHECK(scene->segments[0].world_uv);
     /* Map endpoints must not inherit camera-dependent GSU integer rounding.
@@ -410,6 +414,58 @@ int main(void) {
     word(rom+0x1b0006,0x200);rom[0x1b027e]=128;rom[0x1b027f]=127;
     CHECK(DoomResolutionRecoverEdges(scene,views,ram,rom,0x200000)==1);
     CHECK(scene->segments[0].texture[0]==0x27e);
+    /* A close billboard straddles the native viewport boundary. Independent
+     * yawed billboards give different depths along its width; the output must
+     * retain one depth, image and texture anchor across that boundary. */
+    memset(views,0,3*sizeof(*views));
+    DoomResolutionSprite close={.identity=0x1234,.x=36,.depth=32,
+        .screen_left=108+(36-20)*DOOM_FOCAL/32,
+        .width=40,.height=56,.bottom=-32,.image=0x1000,.map=0xde};
+    views[0].sprites[0]=close;views[0].sprite_count=1;
+    views[2].sprites[0]=close;views[2].sprite_count=1;
+    views[2].sprites[0].x=close.x*cos(DOOM_SIDE_YAW)-close.depth*sin(DOOM_SIDE_YAW);
+    views[2].sprites[0].depth=close.depth*cos(DOOM_SIDE_YAW)+close.x*sin(DOOM_SIDE_YAW);
+    views[2].sprites[0].image=0x200;
+    DoomResolutionMergeSprites(scene,views);
+    CHECK(scene->sprite_count==1 && scene->sprites[0].image==close.image);
+    CHECK(scene->sprites[0].depth==32 && scene->sprites[0].screen_left==close.screen_left);
+    /* A sprite visible only in a wing uses the same flat-camera depth and
+     * span, including when its width covers the join. */
+    views[0].sprite_count=0;
+    views[2].sprites[0].image=close.image;
+    DoomResolutionMergeSprites(scene,views);
+    CHECK(scene->sprite_count==1);
+    CHECK(fabs(scene->sprites[0].depth-close.depth)<1e-9);
+    CHECK(fabs(scene->sprites[0].x-close.x)<1e-9);
+    CHECK(fabs(scene->sprites[0].screen_left-close.screen_left)<1e-9);
+    /* Check actual ROM column sampling and occlusion on both sides of the
+     * join at rx=108, at every resolution. A nearby sprite must keep its
+     * vertical scale and its consecutive texture columns across that join. */
+    scene->horizon_offset=0;
+    for(unsigned scale=1;scale<=4;scale++) {
+        for(unsigned x=218*scale;x<264*scale;x++) {
+            double rx=(x+0.5)/scale-128;
+            double sprite_depths[576];
+            for(unsigned y=0;y<144*scale;y++)sprite_depths[y]=INFINITY;
+            DoomResolutionSprites(scene,rom,0x200000,rx/DOOM_FOCAL,1,
+                x,scale,(uint8_t*)scaled,1024*4,palette,visible,sprite_depths);
+            unsigned sample_y=80*scale;
+            CHECK(fabs(sprite_depths[sample_y]-32)<1e-9);
+            int u=(int)floor((108+rx-scene->sprites[0].screen_left)*32/DOOM_FOCAL);
+            int v=(int)floor((71.5-(sample_y+0.5)/scale)*32/128+32);
+            CHECK(scaled[(sample_y+23*scale)*1024+x]==palette[80][1+(u*7+v)%96]);
+            sprite_depths[sample_y]=16;
+            scaled[(sample_y+23*scale)*1024+x]=0xff112233;
+            DoomResolutionSprites(scene,rom,0x200000,rx/DOOM_FOCAL,1,
+                x,scale,(uint8_t*)scaled,1024*4,palette,visible,sprite_depths);
+            CHECK(scaled[(sample_y+23*scale)*1024+x]==0xff112233);
+        }
+    }
+    /* An object behind the output near plane cannot become a giant inverted
+     * billboard just because a rotated discovery camera could see it. */
+    views[2].sprites[0].x=32;views[2].sprites[0].depth=16;
+    DoomResolutionMergeSprites(scene,views);
+    CHECK(scene->sprite_count==0);
     free(views);
     free(scaled);
     free(out); /* Newly rasterized subpixels, not duplicated native pixels. */

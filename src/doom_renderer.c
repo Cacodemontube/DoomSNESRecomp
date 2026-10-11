@@ -20,6 +20,8 @@
 #include "doom_weapon_sprite.h"
 #include "doom_resolution.h"
 #include "doom_automap.h"
+#include "doom_music.h"
+#include "snes/saveload.h"
 
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
@@ -161,6 +163,16 @@ typedef struct RenderState {
 } RenderState;
 
 static RenderState s;
+/* These overlays no longer exist in native menu scratch tiles. Keep a
+ * paused snapshot's last complete HUD/weapon until configuration resumes. */
+static struct {
+    bool pending,hud_valid;
+    uint32_t level;
+    unsigned count,mask;
+    uint32_t hud[256 * (224-kNativeViewY-DOOM_VIEW_HEIGHT)];
+    DoomWeaponTile tiles[96];
+} loaded_pause;
+static uint64_t texture_cache_epoch;
 static void StopWorkers(void);
 static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,
                                 unsigned first,unsigned last,bool wide);
@@ -382,6 +394,7 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
         /* A previous cartridge can already have been destroyed. Never
          * dereference its pointer here; session reset handles history. */
         StopWorkers();
+        texture_cache_epoch++;
         free(s.side_ram[0]); free(s.side_ram[1]);
         s.side_ram[0] = s.side_ram[1] = NULL;
         free(s.ram);
@@ -443,6 +456,32 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
     }
     if (!s.hook_installed)
         s.hook_installed = superfx_set_pc_hook(fx, kBsp, Capture, NULL);
+    /* A fresh process can restore an already-paused level: no native BSP
+     * task will run until the menu closes. Rebuild only the private scene
+     * from its saved level RAM, without advancing the authentic GSU. */
+    if(!s.has_snapshot && g_snes && g_snes->ram &&
+       ReadWord(g_snes->ram,0x2d)==8 && ReadWord(g_snes->ram,0x2f)==8 &&
+       ReadWord(fx->ram,kSectorCount)>0 && ReadWord(fx->ram,kSectorCount)<=kMaxSectors) {
+        Capture(fx,kBsp,NULL);
+        if(s.has_snapshot) {
+            s.snapshot.r[15].data=(uint16_t)kBsp;
+            s.snapshot.r[15].modified=false;
+            s.snapshot.pipeline=1;s.snapshot.pipeline_pc=UINT32_MAX;
+            s.snapshot.sfr|=kGsuGo;
+        }
+    }
+    if(loaded_pause.pending) {
+        if(s.has_snapshot && g_snes && g_snes->ram &&
+           ReadWord(g_snes->ram,0x2d)==8 && ReadWord(g_snes->ram,0x2f)==8 &&
+           loaded_pause.level==(ReadWord(fx->ram,kLevelIdentity)|
+                               (uint32_t)ReadWord(fx->ram,kLevelIdentity+2)<<16)) {
+            s.menu_hud_valid=loaded_pause.hud_valid;
+            if(s.menu_hud_valid)memcpy(s.menu_hud,loaded_pause.hud,sizeof(s.menu_hud));
+            s.menu_weapon_count=loaded_pause.count;s.menu_weapon_palette_mask=loaded_pause.mask;
+            memcpy(s.menu_weapon_tiles,loaded_pause.tiles,loaded_pause.count*sizeof(*loaded_pause.tiles));
+        }
+        loaded_pause.pending=false;
+    }
 }
 
 static bool WeaponGameplay(const Ppu *ppu)
@@ -456,8 +495,31 @@ static bool NativeMenu(void)
 {
     /* Both native IRQ phases select the in-game menu, including its skill
      * and episode pages. A captured level distinguishes it from startup. */
-    return s.supported && s.has_snapshot && g_snes && g_snes->ram &&
-        ReadWord(g_snes->ram, 0x2d) == 8 && ReadWord(g_snes->ram, 0x2f) == 8;
+    return !DoomMusicBusy() && s.supported && s.has_snapshot && g_snes && g_snes->ram &&
+        (DoomNativeMenuActive() ||
+         (ReadWord(g_snes->ram, 0x2d) == 8 && ReadWord(g_snes->ram, 0x2f) == 8));
+}
+
+void DoomRendererSavePauseState(SaveLoadInfo *sli) {
+    bool paused=NativeMenu();
+    uint32_t header[5]={1,paused && s.menu_hud_valid,
+        paused ? s.menu_weapon_count : 0,paused ? s.menu_weapon_palette_mask : 0,
+        s.fx ? ReadWord(s.fx->ram,kLevelIdentity)|
+               (uint32_t)ReadWord(s.fx->ram,kLevelIdentity+2)<<16 : 0};
+    sli->func(sli,header,sizeof(header));
+    if(header[1])sli->func(sli,s.menu_hud,sizeof(s.menu_hud));
+    if(header[2])sli->func(sli,s.menu_weapon_tiles,header[2]*sizeof(*s.menu_weapon_tiles));
+}
+bool DoomRendererLoadPauseState(SaveLoadInfo *sli) {
+    uint32_t header[5]={0};loaded_pause.pending=false;
+    sli->func(sli,header,sizeof(header));
+    if(header[0]!=1 || header[1]>1 || header[2]>96 || header[3]>255)return false;
+    loaded_pause.hud_valid=header[1]!=0;loaded_pause.count=header[2];
+    loaded_pause.mask=header[3];loaded_pause.level=header[4];
+    if(header[1])sli->func(sli,loaded_pause.hud,sizeof(loaded_pause.hud));
+    if(header[2])sli->func(sli,loaded_pause.tiles,header[2]*sizeof(*loaded_pause.tiles));
+    for(unsigned i=0;i<header[2];i++)if(loaded_pause.tiles[i].palette>7)return false;
+    loaded_pause.pending=header[1] || header[2];return true;
 }
 
 void DoomRendererRememberHud(const uint8_t *field)
@@ -519,13 +581,23 @@ static bool Gameplay(const Ppu *ppu)
          * history-age underflow. Other future or old snapshots stay invalid. */
         (NativeMenu() || s.captured_field == s.field + 1 ||
          s.field - s.captured_field <= kMaxHistoryAge) &&
-        (NativeMenu() || !g_snes || !g_snes->ram || (g_snes->ram[0x2c] & 0x40)) &&
+        /* The final captured scene remains valid during the native fade.
+         * Beam brightness below applies the fade at the selected resolution. */
+        (DoomMusicBusy() || NativeMenu() || !g_snes || !g_snes->ram ||
+         (g_snes->ram[0x2c] & 0x40) ||
+         ((PPU_brightness(ppu)<15 || s.scene_brightness<15) &&
+          !memcmp(s.ram+kLevelIdentity,s.fx->ram+kLevelIdentity,4))) &&
         (ReadWord(s.fx->ram, kAutoMap) == 0 || (s.transparent_map && s.snapshot_map));
 }
 
 void DoomRendererPreparePpu(Ppu *ppu)
 {
     if (!ppu) return;
+    /* The compositor requires isolated BG2/OBJ surfaces. The reference
+     * pixel renderer does not populate them. Reapply this host policy each
+     * field so a saved legacy setting cannot erase menus at startup. */
+    if (s.supported) ppu->renderFlags |= kPpuRenderFlags_NewRenderer;
+    if (DoomMusicBusy()) return;
     if(!MapActive())s.map_current.valid=s.map_presented.valid=s.map_pending_valid=false;
     memset(s.visible_rows, 0, sizeof(s.visible_rows));
     s.weapon_pose_seen = false;
@@ -546,6 +618,11 @@ void DoomRendererPreparePpu(Ppu *ppu)
         PpuSetOverlayCapture(ppu,kPpuOverlaySource_Bg2,0,kNativeViewY,256,DOOM_VIEW_HEIGHT,kPpuOverlayFlag_VisibleOnly);
         PpuSetOverlayCapture(ppu,kPpuOverlaySource_Obj,0,kNativeViewY,256,DOOM_VIEW_HEIGHT,kPpuOverlayFlag_VisibleOnly);
         PpuSetOverlayOamRange(ppu,0,128);
+        /* Menu IRQs can become active before the running flag settles.
+         * Preserve the full OBJ capture, including skull slots 124..127,
+         * instead of rebinding it to the gameplay weapon surface below. */
+        s.weapon_motion = (DoomWeaponMotion){0};
+        return;
     }
     if (!WeaponGameplay(ppu)) {
         s.weapon_motion = (DoomWeaponMotion){0};
@@ -1159,7 +1236,8 @@ static bool WindowCondition(unsigned mode, bool inside)
 void DoomRendererObserveLine(const Ppu *ppu, unsigned line, void *context)
 {
     (void)context;
-    if ((!WeaponGameplay(ppu) && !NativeMenu() && !(s.map_hooks && MapActive())) || line <= kNativeViewY ||
+    if (DoomMusicBusy()) return;
+    if ((!Gameplay(ppu) && !WeaponGameplay(ppu) && !NativeMenu() && !(s.map_hooks && MapActive())) || line <= kNativeViewY ||
         line > kNativeViewY + DOOM_VIEW_HEIGHT) return;
     const unsigned row = line - 1 - kNativeViewY;
     s.visible_rows[row] = !PPU_forcedBlank(ppu) && PPU_mode(ppu) == 3 &&
@@ -1429,7 +1507,7 @@ bool DoomRendererDrawWeapon(Ppu *ppu, uint8_t *dst, size_t pitch,
 {
     const unsigned scale = height / 224;
     const unsigned logical_width = scale ? width / scale : 0;
-    if ((!WeaponGameplay(ppu) && !NativeMenu()) || !dst || scale < 1 || scale > 4 ||
+    if ((!WeaponGameplay(ppu) && !NativeMenu() && !DoomMusicBusy()) || !dst || scale < 1 || scale > 4 ||
         height != scale * 224 || width != logical_width * scale ||
         logical_width < 256 || logical_width > kPpuBufWidth ||
         pitch < width * 4)
@@ -1499,6 +1577,7 @@ void DoomRendererReset(void)
     /* Cartridge replacement can reuse the same SuperFx allocation address.
      * A fresh configuration must validate the ROM and re-register its hook. */
     StopWorkers();
+    texture_cache_epoch++;
     s.fx = NULL;
     s.rom_identity = s.ram_identity = NULL;
     s.hook_installed = s.supported = false;
@@ -1540,6 +1619,18 @@ void DoomRendererSetTransparentMap(bool enabled) {
 }
 bool DoomRendererAutomapOverlay(void) {
     return s.transparent_map && MapActive() && s.map_current.valid;
+}
+bool DoomRendererTransitionPending(void) {
+    if(!s.supported || !s.has_snapshot || !s.fx || !g_snes || !g_snes->ram ||
+       memcmp(s.ram+kLevelIdentity,s.fx->ram+kLevelIdentity,4))return false;
+    bool map=ReadWord(s.fx->ram,kAutoMap)!=0;
+    if(map && (s.interpolation || s.resolution_scale>1 || s.transparent_map) &&
+       !s.map_current.valid)return true;
+    if(!map && !(g_snes->ram[0x2c]&0x40) && !NativeMenu())return true;
+    if(!map && !NativeMenu() &&
+       (s.snapshot_map || s.field-s.captured_field>kMaxHistoryAge))return true;
+    bool visible=false;for(unsigned y=0;y<144;y++)visible|=s.visible_rows[y];
+    return !visible;
 }
 bool DoomRendererDrawAutomap(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,float alpha,bool world) {
     if(!MapActive() || !s.map_current.valid || !(s.interpolation || scale>1 || s.transparent_map) ||
@@ -1615,7 +1706,17 @@ void DoomRendererDrawMessages(uint8_t *dst,size_t pitch,unsigned width,unsigned 
 static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,
                                 unsigned first,unsigned last,bool wide)
 {
-    DoomResolutionColumn columns_cache[256]={0};
+    /* ROM texture columns are immutable. Keep each raster thread's cache
+     * across presentations instead of decoding them again every batch. */
+    static _Thread_local DoomResolutionColumn columns_cache[256];
+    static _Thread_local const uint8_t *columns_rom;
+    static _Thread_local size_t columns_rom_size;
+    static _Thread_local uint64_t columns_epoch;
+    if(columns_rom!=s.snapshot.rom || columns_rom_size!=s.snapshot.rom_size || columns_epoch!=texture_cache_epoch) {
+        memset(columns_cache,0,sizeof(columns_cache));
+        columns_rom=s.snapshot.rom;columns_rom_size=s.snapshot.rom_size;
+        columns_epoch=texture_cache_epoch;
+    }
     doom_resolution_batch_columns=columns_cache;
     unsigned columns = scale == 1 && wide ? 2 : 1;
     for (unsigned x = first; x < last; x += columns) {
@@ -1638,8 +1739,9 @@ static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigne
             geometry==scene ? ratio : 1,
             x, scale, dst, pitch, s.palettes, s.visible_rows, depths);
         if (scale > 1 || (wide && view != 0))
-            DoomResolutionSprites(scene, s.snapshot.rom, s.snapshot.rom_size,
-                (sx - 108) / DOOM_FOCAL, ratio, x, scale, dst, pitch,
+            DoomResolutionSprites(wide ? &s.geometry_scene : scene, s.snapshot.rom, s.snapshot.rom_size,
+                wide ? rx / DOOM_FOCAL : (sx - 108) / DOOM_FOCAL,
+                wide ? 1 : ratio, x, scale, dst, pitch,
                 s.palettes, s.visible_rows, depths);
         if (columns == 2 && x + 1 < last)
             for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
@@ -1673,6 +1775,10 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
     if(scale>1) {
         s.geometry_scene.horizon_offset=s.horizon_offset;
         DoomResolutionPreparePlanes(&s.geometry_scene,scale);
+    }
+    if(wide) {
+        DoomResolutionMergeSprites(&s.geometry_scene,s.resolution_scenes);
+        s.geometry_scene.horizon_offset=s.horizon_offset;
     }
     if (wide) {
         /* Sector and vertex identity identify the same native wall in all

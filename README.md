@@ -4,14 +4,22 @@
 A still in development, native PC port of SNES Doom! 
 With a bunch of quality of life improvements and much more to come!
 
-## Windows v0.01
+## Release v0.02
 
-Download the Windows **x64** or **x86** ZIP from GitHub Releases, extract the
-whole archive, and start **DoomSNESRecomp.exe**. Select your own verified
+Download the Windows **x64** or **x86**, Linux **x64**, or macOS **Intel / Apple
+Silicon** ZIP from GitHub Releases and extract the whole archive. On Windows,
+start **DoomSNESRecomp.exe**; on Linux or macOS, run `./DoomSNESRecomp` from a
+terminal in the extracted folder. Select your own verified
 **Doom (USA).sfc** ROM in the launcher. Keep `assets/` and `mods/` beside the
 executable. The Windows executable icon is generated from `logo1.png`.
 
-The runtime ZIPs can be reproduced with
+See [CHANGELOG.md](CHANGELOG.md) for fixes and remaining limitations, including
+the unresolved E1M1 music crackle. The native release workflow runs the regression
+suite on each platform and stages runtime files with `scripts/stage_runtime.py`.
+Generated build input is supplied through a temporary private draft-release asset
+and removed before publication; no ROM is uploaded.
+
+Windows runtime ZIPs can also be reproduced with
 `scripts/package_windows.ps1 -BuildDirectory build-v001-x64 -Architecture x64`
 (substitute `x86` for a 32-bit build). They contain the executable, runtime
 assets, mods and licenses; ROMs, generated source and local settings are excluded.
@@ -42,6 +50,8 @@ are disabled by default and can be enabled independently:
   to native world rendering. Save data and gameplay speed are unaffected.
   In-game menus retain the high-resolution background and apply the original
   white tint across the widescreen view. Menu lettering stays centered.
+  Fade transitions retain the selected world resolution. Music cheats hold
+  the picture while the native audio loader uploads the selected track.
 
 - **Transparent automap** places map lines over a lightly dimmed live 3D view.
   It works independently of the resolution and frame-rate options, and follows
@@ -69,16 +79,30 @@ Type the codes directly during gameplay; no console is needed.
 | `IDDQD` | Toggle god mode with the glowing-eye face. Enabling sets health to 100%; disabling keeps your current health. |
 | `IDKFA` | All weapons, full ammo, 200% armor, and all keys. |
 | `IDFA` | All weapons, full ammo, and 200% armor; existing keys are retained. |
+| `IDCHOPPERS` | Give and select the chainsaw. |
+| `IDBEHOLDR` | Toggle the radiation shielding suit. |
+| `IDBEHOLDI` | Toggle partial invisibility. |
+| `IDBEHOLDV` | Toggle the invulnerability powerup. |
+| `IDBEHOLDA` | Give the computer area map; repeated use keeps it enabled. |
+| `IDBEHOLDL` | Toggle the light amplification visor. |
+| `IDBEHOLDS` | Toggle berserk; enabling restores health to at least 100% and selects fists. |
 | `IDCLIP` | Toggle wall noclip. |
 | `IDDT` | Cycle full map, full map with living monsters as green arrows, and normal map. |
 | `IDCLEVxy` | Warp to episode `x`, mission `y`, with a black-screen transition and pistol start at the current difficulty. |
+| `IDMUSxy` | Restart the music from episode `x`, mission `y`, without changing the level or inventory. |
 
 Available warp destinations are E1M1–5, E1M7–9; E2M1, E2M3–4, E2M6,
 E2M8–9; and E3M1–4, E3M6–9. Missing SNES levels are rejected. Exiting a
 warped level follows the game's normal progression and secret-exit rules.
+`IDMUSxy` accepts those same 22 maps and uses their original SNES tracks;
+some maps share music. Entering the same code again restarts the track.
 Disabling the mod also disables god mode and noclip. Granted inventory stays.
 Typing is ignored while a host panel is open or the game is unfocused.
 See [cheat validation](tests/CHEATS.md).
+
+Powerups use the original SNES pickup durations and effects. Their cheats
+also turn off powerups collected in a level. Turning berserk off preserves
+the health it granted.
 
 ## Modern keyboard and mouse
 

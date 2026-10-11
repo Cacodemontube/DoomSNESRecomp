@@ -22,6 +22,8 @@
 } } while (0)
 
 Config g_config;
+static bool transition_pending, fake_world;
+bool DoomRendererTransitionPending(void) { return transition_pending; }
 static Snes machine;
 static Cart cart;
 static SuperFx fx;
@@ -41,6 +43,9 @@ static float drawn_alpha;
 static SNESModActivationCallback plugin_callbacks[4], reset_callback;
 
 int DoomInputLookEnabled(void) { return 0; }
+static bool music_busy;
+int DoomMusicBusy(void) { return music_busy; }
+int DoomNativeMenuActive(void) { return 0; }
 double DoomInputPitch(void) { return 0; }
 void DoomRendererSetLook(bool enabled, double offset) { CHECK(!enabled && offset == 0); }
 void DoomRendererSetTransparentMap(bool enabled) { configured_transparent=enabled; }
@@ -170,12 +175,13 @@ bool DoomRendererDraw(Ppu *source, uint8_t *dst, size_t pitch,
     CheckSeed(dst, pitch, width, height);
     drawn_alpha = alpha;
     draw_calls++;
-    return false;
+    return fake_world;
 }
 
 bool DoomRendererDrawWeapon(Ppu *source, uint8_t *dst, size_t pitch,
                             unsigned width, unsigned height, float alpha,
                             bool world_redrawn) {
+    if(world_redrawn && fake_world)return true;
     CHECK(source == g_ppu && !world_redrawn);
     if (height == DOOM_HEIGHT) CheckSeed(dst, pitch, width, height);
     else {
@@ -348,16 +354,81 @@ static void resolution_fallback_tests(void) {
     }
     resolution_enabled = false; resolution_option = "2"; expected_field = NULL;
 }
+static void wide_transition_tests(void) {
+    for (unsigned scale=1;scale<=4;scale++) {
+        char option[2]={(char)('0'+scale),0};
+        resolution_enabled=scale>1;resolution_option=option;
+        SetOptions(true,"16:9",true,"120");DoomPresentationReset();
+        unsigned width=342*scale,height=224*scale;
+        size_t pitch=(width+7)*4,bytes=pitch*height;
+        uint8_t *guard=malloc(bytes+2*GUARD_BYTES);
+        uint32_t *field=malloc(256*224*4);CHECK(guard && field);
+        memset(guard,GUARD_VALUE,bytes+2*GUARD_BYTES);
+        expected_field=(uint8_t *)field;expected_width=342;
+        expected_pitch=scale>1 ? 342*4 : pitch;
+        for(unsigned i=0;i<256*224;i++)field[i]=0xff123456;
+        fake_world=true;DoomPresentationEnd((uint8_t *)field,10);
+        CHECK(DoomPresentationDraw(guard+GUARD_BYTES,pitch,(uint8_t *)field,width,height,1));
+        fake_world=false;transition_pending=true;
+        for(unsigned i=0;i<256*224;i++)field[i]=0xff654321;
+        DoomPresentationEnd((uint8_t *)field,11);
+        CHECK(DoomPresentationDraw(guard+GUARD_BYTES,pitch,(uint8_t *)field,width,height,1));
+        CHECK(((uint32_t *)(guard+GUARD_BYTES+pitch*100*scale))[100*scale]==0xff123456);
+        DoomPresentationEnd((uint8_t *)field,23);
+        CHECK(DoomPresentationDraw(guard+GUARD_BYTES,pitch,(uint8_t *)field,width,height,1));
+        CHECK(((uint32_t *)(guard+GUARD_BYTES+pitch*100*scale))[100*scale]==0xff654321);
+        for(unsigned y=0;y<height;y++)
+            for(size_t x=width*4;x<pitch;x++)CHECK(guard[GUARD_BYTES+y*pitch+x]==GUARD_VALUE);
+        for(unsigned i=0;i<GUARD_BYTES;i++) {
+            CHECK(guard[i]==GUARD_VALUE);CHECK(guard[GUARD_BYTES+bytes+i]==GUARD_VALUE);
+        }
+        transition_pending=false;free(field);free(guard);
+    }
+    resolution_enabled=false;resolution_option="2";expected_field=NULL;DoomPresentationReset();
+}
 int main(void) {
     machine.cart = &cart;
     cart.superfx = &fx;
     settings_tests();
     resolution_fallback_tests();
+    wide_transition_tests();
     fallback_test(256, false, false, 0.25);
     fallback_test(256, false, true, 0.25);
     fallback_test(342, true, false, 0.25);
     fallback_test(448, true, true, 0.25);
     fallback_test(682, true, true, 0.75);
+    /* The uploader can replace native framebuffer scratch. Preserve a
+     * complete presentation until it returns, including repeated draws. */
+    SetOptions(false,"Fit",false,"120");DoomPresentationBeforeFrame();
+    uint32_t *music_native=malloc(256*224*4),*music_output=malloc(256*224*4);
+    CHECK(music_native && music_output);
+    for(unsigned i=0;i<256*224;i++)music_native[i]=0xff102030;
+    DoomPresentationEnd((uint8_t *)music_native,1);music_busy=true;
+    uint8_t *music_reference=malloc(256*224*4);CHECK(music_reference);
+    memcpy(music_reference,music_native,256*224*4);
+    expected_field=music_reference;expected_width=256;expected_pitch=256*4;
+    memset(music_native,0,256*224*4);
+    CHECK(DoomPresentationDraw((uint8_t *)music_output,256*4,(uint8_t *)music_native,256,224,1));
+    CHECK(music_output[1234]==0xff102030);
+    memset(music_output,0,256*224*4);
+    CHECK(DoomPresentationDraw((uint8_t *)music_output,256*4,(uint8_t *)music_native,256,224,1));
+    CHECK(music_output[1234]==0xff102030);
+    music_busy=false;DoomPresentationReset();
+    SetOptions(false,"Fit",true,"120");
+    expected_field=(uint8_t *)music_native;
+    for(unsigned i=0;i<256*224;i++)music_native[i]=0xff123456;
+    fake_world=true;DoomPresentationEnd((uint8_t *)music_native,10);
+    CHECK(DoomPresentationDraw((uint8_t *)music_output,256*4,(uint8_t *)music_native,256,224,1));
+    fake_world=false;transition_pending=true;
+    for(unsigned i=0;i<256*224;i++)music_native[i]=0xff654321;
+    DoomPresentationEnd((uint8_t *)music_native,11);
+    CHECK(DoomPresentationDraw((uint8_t *)music_output,256*4,(uint8_t *)music_native,256,224,1));
+    CHECK(music_output[1234]==0xff123456);
+    DoomPresentationEnd((uint8_t *)music_native,23);
+    CHECK(DoomPresentationDraw((uint8_t *)music_output,256*4,(uint8_t *)music_native,256,224,1));
+    CHECK(music_output[1234]==0xff654321); /* Bounded: no frozen cutscene. */
+    transition_pending=false;DoomPresentationReset();free(music_native);free(music_output);
+    free(music_reference);expected_field=NULL;
     puts("Doom presentation: mod queries, startup/resize policy, and guarded fallback passed");
     return 0;
 }

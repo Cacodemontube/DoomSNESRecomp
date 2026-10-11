@@ -10,6 +10,10 @@ static SDL_Window *TestFocus(void) { return focus; }
 #define CHECK(x) do { if(!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while(0)
 Snes *g_snes;
 static int selected;
+static unsigned music_level,music_requests;
+void DoomMusicRequest(unsigned level) {music_level=level;music_requests++;}
+void DoomMusicReset(void) {}
+void DoomMusicBeforeFrame(int enabled) {(void)enabled;}
 int snes_mod_runtime_feature_enabled_c(const char *p,const char *f) {
     CHECK(!strcmp(p,"doom.cheats") && !strcmp(f,"keyboard-cheats"));return selected;
 }
@@ -34,6 +38,12 @@ static void Run(SuperFx *fx,unsigned pc) {
     superfx_cpu_write_io(fx,0x301f,(uint8_t)(pc>>8));
     superfx_sync(fx,fx->master_clock+100000);
     CHECK(!superfx_is_running(fx));
+}
+static void PickupDone(SuperFx *fx,uint32_t pc,void *context) {
+    (void)pc;(void)context;superfx_hook_redirect(fx,0xf800);
+}
+static void PickupDrop(SuperFx *fx,uint32_t pc,void *context) {
+    (void)pc;(void)context;superfx_hook_redirect(fx,(uint16_t)superfx_reg(fx,11));
 }
 int main(int argc,char **argv) {
     uint8_t *rom=calloc(1,0x200000),*ram=calloc(1,0x10000);CHECK(rom && ram);
@@ -82,6 +92,65 @@ int main(int argc,char **argv) {
     CHECK(Word(fx,0x1d4)==200 && Word(fx,0x5e)==200 && Word(fx,0x64)==300);
     ram[0x47]=1;Command(fx,"idkfa");CHECK(ram[0x1d8]==63);
     CHECK(Word(fx,0x5e)==400 && Word(fx,0x60)==100 && Word(fx,0x62)==100 && Word(fx,0x64)==600);
+    ram[PlayerArms]=3;Put(fx,WeaponNext,2);
+    Command(fx,"garbageidchoppers");
+    CHECK(ram[PlayerArms]==11 && Word(fx,WeaponNext)==6);
+    Put(fx,WeaponNext,2);Command(fx,"IDCHOPPERS");
+    CHECK(Word(fx,WeaponNext)==6); /* an owned chainsaw still gets selected */
+    static const struct { const char *code;unsigned timer,pc; } powerups[]={
+        {"IDBEHOLDR",RadCount,0xb3eb},{"IDBEHOLDI",InvisibleCount,0xb3f7},
+        {"IDBEHOLDV",InvulnerableCount,0xb3ff},{"IDBEHOLDL",LightGoggles,0xb416},
+        {"IDBEHOLDS",BerserkCount,0xb3ba}
+    };
+    if(argc>1) {
+        /* Stop native pickups before their shared message/object-removal path.
+         * Keep the actual timer, health, face and inventory instructions. */
+        CHECK(superfx_set_pc_hook(fx,0xac1e,PickupDone,NULL));
+        CHECK(superfx_set_pc_hook(fx,0xac26,PickupDone,NULL));
+        CHECK(superfx_set_pc_hook(fx,0x8579,PickupDrop,NULL));
+    }
+    for(unsigned i=0;i<sizeof(powerups)/sizeof(*powerups);i++) {
+        unsigned timer=powerups[i].timer;
+        Put(fx,p+32,37);Put(fx,WeaponNext,2);Put(fx,RLRGB,0xffff);
+        Command(fx,powerups[i].code);CHECK(Word(fx,timer)==3600);
+        if(timer==RadCount)CHECK(Word(fx,RLRGB)==2);
+        if(timer==InvulnerableCount)CHECK(Word(fx,0x38)==0xe8b8 && !god);
+        if(timer==BerserkCount)CHECK(Word(fx,Berserk)==3600 && Word(fx,p+32)==100 && !Word(fx,WeaponNext) && Word(fx,RLRGB)==4);
+        Command(fx,powerups[i].code);CHECK(!Word(fx,timer));
+        if(timer==BerserkCount)CHECK(!Word(fx,Berserk) && Word(fx,p+32)==100);
+        if(timer==InvulnerableCount)CHECK(Word(fx,0x38)!=0xe8b8);
+        if(argc>1) {
+            Put(fx,p+32,37);Put(fx,WeaponNext,2);
+            superfx_set_reg(fx,11,0xf800);Run(fx,powerups[i].pc);
+            CHECK(Word(fx,timer)==3600);
+            if(timer==BerserkCount)CHECK(Word(fx,Berserk)==3600 && Word(fx,p+32)==100 && !Word(fx,WeaponNext));
+        } else Put(fx,timer,123); /* a pickup already in progress */
+        Command(fx,powerups[i].code);CHECK(!Word(fx,timer));
+        if(timer==BerserkCount)CHECK(!Word(fx,Berserk));
+    }
+    if(argc>1) {
+        ram[PlayerArms]=3;Put(fx,WeaponNext,2);
+        superfx_set_reg(fx,11,0xf800);Run(fx,0xb38b);
+        CHECK(ram[PlayerArms]==11 && Word(fx,WeaponNext)==6);
+        ram[ComputerMap]=0;superfx_set_reg(fx,11,0xf800);Run(fx,0xb40e);
+        CHECK(ram[ComputerMap]==1);ram[ComputerMap]=0;
+        CHECK(superfx_set_pc_hook(fx,0xac1e,NULL,NULL));
+        CHECK(superfx_set_pc_hook(fx,0xac26,NULL,NULL));
+        CHECK(superfx_set_pc_hook(fx,0x8579,NULL,NULL));
+    }
+    /* Berserk never lowers health, and its persistent strength toggles off
+     * even after the red-palette countdown has expired. */
+    Put(fx,p+32,150);Command(fx,"IDBEHOLDS");CHECK(Word(fx,p+32)==150);
+    Put(fx,BerserkCount,0);Command(fx,"IDBEHOLDS");CHECK(!Word(fx,Berserk));
+    Command(fx,"IDBEHOLDR");Command(fx,"IDBEHOLDS");
+    Command(fx,"IDBEHOLDS");CHECK(Word(fx,RLRGB)==2 && Word(fx,RadCount));
+    Command(fx,"IDBEHOLDR");CHECK(!Word(fx,RLRGB));
+    Command(fx,"IDDQD");Command(fx,"IDBEHOLDV");Command(fx,"IDBEHOLDV");
+    CHECK(god && Word(fx,0x38)==0xe8b8);Command(fx,"IDDQD");
+    Command(fx,"IDBEHOLDA");Command(fx,"IDBEHOLDA");CHECK(ram[ComputerMap]==1);
+    Command(fx,"IDDT");Command(fx,"IDBEHOLDA");Command(fx,"IDDT");Command(fx,"IDDT");
+    CHECK(!map_mode && ram[ComputerMap]==1);
+    ram[ComputerMap]=0;
     Command(fx,"idclip");CHECK(clip);
     Put(fx,0x11c,p);Put(fx,p+6,0xff00);Put(fx,p+8,10);
     Put(fx,p+10,0);Put(fx,p+12,20);Put(fx,p+16,0x180);Put(fx,p+18,0xff00);
@@ -105,7 +174,15 @@ int main(int argc,char **argv) {
         char text[9]="IDCLEV";strcat(text,warps[i]);Put(fx,0,4);
         Command(fx,text);CHECK(Word(fx,0x1e8)==((unsigned)Level(warps[i][0]-'0',warps[i][1]-'0')<<8|0x52));
         CHECK(Word(fx,0)==4);
+        char music[16]="garbageIDMUS";strcat(music,warps[i]);
+        unsigned exit_level=Word(fx,0x1e8),requests=music_requests;
+        Command(fx,music);
+        CHECK(music_requests==requests+1 && music_level==(unsigned)Level(warps[i][0]-'0',warps[i][1]-'0'));
+        CHECK(Word(fx,0x1e8)==exit_level && Word(fx,0)==4);
     }
+    unsigned requests=music_requests;
+    Command(fx,"IDMUS16");Command(fx,"IDMUS22");Command(fx,"IDMUS99");
+    CHECK(music_requests==requests && !pending);
     Command(fx,"IDCLEV16");CHECK(!pending);
     Type("IDD");
     SDL_Event repeat;memset(&repeat,0,sizeof(repeat));repeat.type=SDL_KEYDOWN;repeat.key.repeat=1;
@@ -132,6 +209,6 @@ int main(int argc,char **argv) {
     CHECK(Word(fx,0x36)!=0xe8b8 && !ram[0x46]);
     selected=1;rom[0x501]^=1;DoomCheatsBeforeFrame();CHECK(!fx->pc_hook_count);
     DoomCheatsShutdown();superfx_destroy(fx);free(rom);free(ram);
-    puts("Cheats: parser, native god damage/face, inventory, noclip, map arrows, all 22 warps and lifecycle passed");
+    puts("Cheats: parser, native pickups and powerup toggles, god damage/face, inventory, noclip, map arrows, all 22 warps and lifecycle passed");
     return 0;
 }

@@ -27,6 +27,9 @@ version = "1.0.0"
 package_id = "doom.presentation"
 id = "modern-controls"
 enabled = true
+[feature.values]
+vertical-look = "on"
+jumping = "on"
 [[feature]]
 package_id = "doom.presentation"
 id = "widescreen"

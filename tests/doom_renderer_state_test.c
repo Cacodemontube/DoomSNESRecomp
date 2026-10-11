@@ -3,6 +3,9 @@
  * timing and raster policy without advancing any native game execution. */
 #define DOOM_RENDERER_SYNCHRONOUS 1
 #include "../src/doom_renderer.c"
+static bool music_busy;
+int DoomMusicBusy(void) { return music_busy; }
+int DoomNativeMenuActive(void) { return 0; }
 
 #include <stdio.h>
 
@@ -15,6 +18,19 @@
 
 Snes *g_snes;
 static unsigned registrations, replay_attempts, overlay_bindings;
+typedef struct PauseStream {
+    SaveLoadInfo sli;
+    uint8_t bytes[65536];
+    size_t position;
+    bool load;
+} PauseStream;
+static void PauseTransfer(SaveLoadInfo *sli,void *data,size_t size) {
+    PauseStream *stream=(PauseStream *)sli;
+    CHECK(size<=sizeof(stream->bytes)-stream->position);
+    if(stream->load)memcpy(data,stream->bytes+stream->position,size);
+    else memcpy(stream->bytes+stream->position,data,size);
+    stream->position+=size;
+}
 
 bool superfx_set_pc_hook(SuperFx *fx, uint32_t pc, SuperFxPcHook *hook,
                         void *context)
@@ -109,7 +125,10 @@ static void SetBrightness(Ppu *ppu, unsigned brightness)
 
 int main(int argc, char **argv)
 {
-    CHECK(argc == 2);
+    if(argc!=2) {
+        fprintf(stderr,"Usage: %s <Doom ROM path>\n",argv[0]);
+        return 2;
+    }
     SuperFx fx = {0};
     fx.rom_size = 0x200000;
     fx.rom = malloc(fx.rom_size);
@@ -242,7 +261,10 @@ int main(int argc, char **argv)
     /* The host prepares raster capture before EndSimFrame counts the field
      * in which the native BSP hook captured this new renderer generation. */
     CHECK(s.captured_field == s.field + 1);
+    ppu->renderFlags=kPpuRenderFlags_NoSpriteLimits; /* persisted reference PPU */
     DoomRendererPreparePpu(ppu);
+    CHECK(ppu->renderFlags & kPpuRenderFlags_NewRenderer);
+    CHECK(ppu->renderFlags & kPpuRenderFlags_NoSpriteLimits);
     CHECK(overlay_bindings == 1);
     const unsigned pending_field = s.field;
     s.field = s.captured_field + kMaxHistoryAge + 1;
@@ -484,7 +506,32 @@ int main(int argc, char **argv)
     CHECK(output[180*342+43+20]==0xff556677);
     s.scene_brightness=0;DoomRendererDrawMenu((uint8_t *)output,342*4,342,1);
     CHECK(output[180*342+43+20]==0xff000000);
-    WriteWord(menu_ram,0x2d,0);CHECK(!NativeMenu() && !Gameplay(ppu));g_snes=NULL;
+    /* A fresh-process paused snapshot must retain artwork the native menu
+     * already removed from its scratch tiles, across the host reset. */
+    PauseStream pause_stream={.sli={.func=PauseTransfer}};
+    DoomRendererSavePauseState(&pause_stream.sli);
+    pause_stream.load=true;pause_stream.position=0;
+    CHECK(DoomRendererLoadPauseState(&pause_stream.sli));
+    WriteWord(fx.ram,kSectorCount,1);
+    DoomRendererReset();DoomRendererConfigure(&fx,true,true,342);
+    CHECK(s.has_snapshot && NativeMenu());
+    CHECK(s.menu_hud_valid && s.menu_hud[(180-kNativeViewY-DOOM_VIEW_HEIGHT)*256+20]==0xff556677);
+    CHECK(s.menu_weapon_count==1 && s.menu_weapon_palette_mask==1);
+    CHECK(s.menu_weapon_tiles[0].pixels[0]==1);
+    WriteWord(menu_ram,0x2d,0);CHECK(!NativeMenu());g_snes=NULL;
+    g_snes=&machine;s.field=s.captured_field;
+    ppu->inidisp=7;CHECK(Gameplay(ppu));
+    DoomRendererPreparePpu(ppu);DoomRendererObserveLine(ppu,kNativeViewY+1,NULL);
+    CHECK(s.visible_rows[0] && s.scene_brightness==7);
+    /* The journal restores post-field registers after scanout. The draw
+     * still uses the brightness observed on the visible beam. */
+    ppu->inidisp=15;CHECK(Gameplay(ppu));
+    s.scene_brightness=15;CHECK(!Gameplay(ppu));
+    music_busy=true;
+    CHECK(!NativeMenu() && Gameplay(ppu));
+    CHECK(DoomRendererDrawWeapon(ppu,(uint8_t *)output,342*4,342,224,0,true));
+    CHECK(output[kNativeViewY*342+43+25]==0xff654321);
+    music_busy=false;g_snes=NULL;
     DoomRendererConfigure(NULL, false, false, 256);
     free(output); free(ppu); free(fx.ram); free(fx.rom);
     puts("Doom renderer state tests passed");

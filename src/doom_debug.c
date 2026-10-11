@@ -3,6 +3,7 @@
 #include "doom_renderer.h"
 #include "doom_input.h"
 #include "doom_cheats.h"
+#include "doom_music.h"
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
 #include "snes/cart.h"
@@ -22,8 +23,10 @@ static int requested_motion, motion_x, motion_y;
 static int requested_key;
 static DoomInputStats input_stats;
 static DoomCheatsStats cheat_stats;
-static char requested_cheat[9];
+static char requested_cheat[11];
+static int requested_cheat_keyboard;
 static int requested_level_exit;
+static int music_loading;
 static unsigned long long draws;
 static double draw_total_ms, draw_max_ms;
 #if SNESRECOMP_SDL3
@@ -43,10 +46,26 @@ void DoomDebugRecordFrame(unsigned number) {
     int mouse_request = requested_motion, dx = motion_x, dy = motion_y;
     requested_motion = 0;
     int key_request=requested_key;requested_key=0;
-    char cheat_request[9];memcpy(cheat_request,requested_cheat,9);requested_cheat[0]=0;
+    char cheat_request[sizeof(requested_cheat)];
+    memcpy(cheat_request,requested_cheat,sizeof(cheat_request));requested_cheat[0]=0;
+    int cheat_keyboard=requested_cheat_keyboard;requested_cheat_keyboard=0;
     int level_exit=requested_level_exit;requested_level_exit=0;
     UNLOCK();
-    if(cheat_request[0])DoomCheatsTestText(cheat_request);
+    if(cheat_request[0] && cheat_keyboard) {
+        /* Exercise the same event routing as typing, including host hotkeys. */
+        for(const char *p=cheat_request;*p;p++) {
+            SDL_Event event;memset(&event,0,sizeof(event));
+            int key=*p>='A' && *p<='Z'?*p+'a'-'A':*p;
+            event.type=SDL_KEYDOWN;
+#if SNESRECOMP_SDL3
+            event.key.key=key;
+#else
+            event.key.keysym.sym=key;
+#endif
+            SDL_PushEvent(&event);
+            event.type=SDL_KEYUP;SDL_PushEvent(&event);
+        }
+    } else if(cheat_request[0])DoomCheatsTestText(cheat_request);
     if(level_exit)DoomCheatsTestExit();
     if (mouse_request) DoomInputMotion(dx, dy);
     if(key_request) {
@@ -70,6 +89,7 @@ void DoomDebugRecordFrame(unsigned number) {
     stats = snapshot;
     input_stats = input_snapshot;
     cheat_stats=cheat_snapshot;
+    music_loading=DoomMusicBusy();
     frame = number;
     invisibility_ticks = ticks;
     p1 = g_snes ? g_snes->input1_currentState : 0;
@@ -89,17 +109,26 @@ void DoomDebugRecordDraw(double milliseconds) {
 }
 
 static int Command(const char *cmd, const char *args, DebugServerGameSendLine send) {
+    if(!strcmp(cmd,"music_stats")) {
+        char json[128];LOCK();int loading=music_loading;unsigned f=frame;UNLOCK();
+        snprintf(json,sizeof(json),"{\"ok\":true,\"frame\":%u,\"loading\":%d}",f,loading);
+        send(json);return 1;
+    }
     if(!strcmp(cmd,"cheat_exit_test")) {
         LOCK();int ready=cheat_stats.enabled && cheat_stats.ready;
         if(ready)requested_level_exit=1;UNLOCK();
         send(ready?"{\"ok\":true,\"queued\":true}":"{\"ok\":false,\"error\":\"gameplay required\"}");return 1;
     }
-    if(!strcmp(cmd,"cheat_test")) {
-        size_t n=strlen(args);int valid=n>=4 && n<=8;
+    if(!strcmp(cmd,"cheat_test") || !strcmp(cmd,"cheat_keyboard_test")) {
+        size_t n=strlen(args);int valid=n>=4 && n<=10;
         for(size_t i=0;i<n;i++)if(!((args[i]>='A' && args[i]<='Z') ||
             (args[i]>='a' && args[i]<='z') || (args[i]>='0' && args[i]<='9')))valid=0;
         LOCK();int ready=cheat_stats.enabled && cheat_stats.ready;
-        if(valid && ready)memcpy(requested_cheat,args,n+1);UNLOCK();
+        if(valid && ready) {
+            memcpy(requested_cheat,args,n+1);
+            requested_cheat_keyboard=!strcmp(cmd,"cheat_keyboard_test");
+        }
+        UNLOCK();
         send(valid && ready?"{\"ok\":true,\"queued\":true}":"{\"ok\":false,\"error\":\"cheat_test requires enabled cheats and gameplay\"}");
         return 1;
     }

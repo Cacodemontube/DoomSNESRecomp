@@ -31,7 +31,7 @@ typedef struct DoomResolutionUv {
 } DoomResolutionUv;
 typedef struct DoomResolutionSprite {
     double x, depth, bottom;
-    int16_t screen_left;
+    double screen_left;
     uint16_t image, identity;
     uint8_t width, height, flip, map;
 } DoomResolutionSprite;
@@ -65,7 +65,7 @@ typedef struct DoomResolutionScene {
     unsigned ray_count[DOOM_RES_RAY_BINS];
     double ray_limit;
     bool rays_ready;
-    DoomResolutionSprite sprites[28];
+    DoomResolutionSprite sprites[84];
     uint8_t sectors[205 * 14];
     int view_z;
     double horizon_offset; /* Build-style vertical shear, in native world rows. */
@@ -101,9 +101,16 @@ static inline bool DoomResolutionMapVertex(const uint8_t *ram, unsigned vertex,
     if(address+4>rom_size)return false;
     double wx=DoomResolutionSigned(rom+address)-DoomResolutionSigned(ram+0x22);
     double wy=DoomResolutionSigned(rom+address+2)-DoomResolutionSigned(ram+0x24);
-    double angle=DoomResolutionWord(ram+0x28)*(2*3.14159265358979323846/65536);
-    *x=wx*sin(angle)-wy*cos(angle);
-    *z=wx*cos(angle)+wy*sin(angle);
+    /* Hundreds of edges share the same camera angle in one capture. */
+    static _Thread_local unsigned cached_angle=65536;
+    static _Thread_local double sine,cosine;
+    unsigned angle_word=DoomResolutionWord(ram+0x28);
+    if(cached_angle!=angle_word) {
+        double angle=angle_word*(2*3.14159265358979323846/65536);
+        sine=sin(angle);cosine=cos(angle);cached_angle=angle_word;
+    }
+    *x=wx*sine-wy*cosine;
+    *z=wx*cosine+wy*sine;
     return true;
 }
 static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
@@ -121,7 +128,9 @@ static inline bool DoomResolutionCapture(DoomResolutionScene *scene,
     scene->view_z = view_z;
     scene->light_adjust = ram[0xce];
     scene->invulnerable = DoomResolutionWord(ram + 0x40) != 0;
-    scene->sky2 = false;
+    /* EMNUM bit 1 selects SKY2 in retail rldrawf.a. A camera may expose
+     * sky only through mouse look, without any native sky PLOT callbacks. */
+    scene->sky2 = (DoomResolutionWord(ram + 0x7a) & 2) != 0;
     for (unsigned a = 0x7180; a < end; a += DOOM_RES_SEGMENT_SIZE) {
         const uint8_t *p = ram + a;
         unsigned v1 = DoomResolutionWord(p + 52), v2 = DoomResolutionWord(p + 54);
@@ -218,6 +227,17 @@ static inline unsigned DoomResolutionRecoverEdges(DoomResolutionScene *scene,
             textures[alt][id].valid=true;
         }
     }
+    /* Index directed vertex pairs and sectors once. Dense levels previously
+     * searched every accumulated segment again for each map edge. */
+    uint64_t edge_keys[4096]={0};
+    for(unsigned j=0;j<scene->count;j++) {
+        const DoomResolutionSegment *edge=&scene->segments[j];
+        uint64_t key=1+((uint64_t)edge->vertex[0] | ((uint64_t)edge->vertex[1]<<16) |
+            ((uint64_t)edge->near_sector<<32));
+        unsigned slot=(unsigned)((key^(key>>21))*2654435761u)&4095;
+        while(edge_keys[slot] && edge_keys[slot]!=key)slot=(slot+1)&4095;
+        edge_keys[slot]=key;
+    }
     unsigned recovered=0;
     for(unsigned i=0;i<num && scene->count<DOOM_RES_SEGMENTS;i++) {
         unsigned address=DoomResolutionRomAddress(bank,
@@ -236,12 +256,11 @@ static inline unsigned DoomResolutionRecoverEdges(DoomResolutionScene *scene,
         unsigned fa=DoomResolutionRomAddress(bank,edge.face);
         if(fa+4>size || rom[fa]>=205)continue;
         edge.near_sector=rom[fa];edge.far_sector=UINT16_MAX;
-        bool duplicate=false;
-        for(unsigned j=0;j<scene->count;j++)if(scene->segments[j].vertex[0]==edge.vertex[0] &&
-            scene->segments[j].vertex[1]==edge.vertex[1] && scene->segments[j].near_sector==edge.near_sector) {
-            duplicate=true;break;
-        }
-        if(duplicate)continue;
+        uint64_t edge_key=1+((uint64_t)edge.vertex[0] | ((uint64_t)edge.vertex[1]<<16) |
+            ((uint64_t)edge.near_sector<<32));
+        unsigned edge_slot=(unsigned)((edge_key^(edge_key>>21))*2654435761u)&4095;
+        while(edge_keys[edge_slot] && edge_keys[edge_slot]!=edge_key)edge_slot=(edge_slot+1)&4095;
+        if(edge_keys[edge_slot])continue;
         const uint8_t *near=scene->sectors+edge.near_sector*14;
         edge.floor_height=DoomResolutionSigned(near+2);
         edge.ceiling_height=DoomResolutionSigned(near+4);
@@ -283,6 +302,7 @@ static inline unsigned DoomResolutionRecoverEdges(DoomResolutionScene *scene,
         edge.offset_x=raw[5];edge.offset_y=raw[6];edge.world_uv=true;
         edge.length=hypot(edge.x2-edge.x1,edge.z2-edge.z1);
         scene->segments[scene->count++]=edge;recovered++;
+        edge_keys[edge_slot]=edge_key;
     }
     return recovered;
 }
@@ -727,6 +747,38 @@ static inline void DoomResolutionCaptureSprites(DoomResolutionScene *scene,
             scene->sprites[j]=scene->sprites[j-1];j--;
         }
         scene->sprites[j]=sprite;
+    }
+}
+/* Visibility cameras discover objects; they must not each orient a different
+ * portion of the same billboard. Project each identity once in the output
+ * camera, preferring the native centre image and its original pixel anchor. */
+static inline void DoomResolutionMergeSprites(DoomResolutionScene *dst,
+    const DoomResolutionScene *views) {
+    dst->sprite_count=0;
+    for(unsigned view=0;view<3;view++) {
+        double yaw=view==1 ? -DOOM_SIDE_YAW : view==2 ? DOOM_SIDE_YAW : 0;
+        for(unsigned i=0;i<views[view].sprite_count;i++) {
+            const DoomResolutionSprite *source=&views[view].sprites[i];
+            unsigned j;
+            for(j=0;j<dst->sprite_count;j++)
+                if(dst->sprites[j].identity==source->identity)break;
+            if(j<dst->sprite_count || dst->sprite_count>=84)continue;
+            DoomResolutionSprite sprite=*source;
+            sprite.x=source->x*cos(yaw)+source->depth*sin(yaw);
+            sprite.depth=source->depth*cos(yaw)-source->x*sin(yaw);
+            if(sprite.depth<DOOM_RES_SCREEN_PLANE)continue;
+            if(view) sprite.screen_left=108+
+                (sprite.x-sprite.width*0.5)*DOOM_FOCAL/sprite.depth;
+            dst->sprites[dst->sprite_count++]=sprite;
+        }
+    }
+    for(unsigned i=1;i<dst->sprite_count;i++) {
+        DoomResolutionSprite sprite=dst->sprites[i];
+        unsigned j=i;
+        while(j && dst->sprites[j-1].depth<sprite.depth) {
+            dst->sprites[j]=dst->sprites[j-1];j--;
+        }
+        dst->sprites[j]=sprite;
     }
 }
 static inline bool DoomResolutionDecodeSprite(const uint8_t *rom, size_t size,

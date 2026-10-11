@@ -2,6 +2,7 @@
 #include "doom_renderer.h"
 #include "doom_video.h"
 #include "doom_input.h"
+#include "doom_music.h"
 
 #include "common_cpu_infra.h"
 #include "common_rtl.h"
@@ -15,6 +16,13 @@ static DoomVideoSettings settings;
 static DoomViewport viewport = {256, 0, 4.0 / 3.0};
 static uint8_t resolution_base[DOOM_MAX_WIDTH * DOOM_HEIGHT * 4];
 static bool transparent_map;
+static uint8_t music_field[DOOM_STOCK_WIDTH * DOOM_HEIGHT * 4];
+static uint8_t music_picture[DOOM_MAX_WIDTH * 4 * DOOM_HEIGHT * 4 * 4];
+static bool music_field_valid, music_picture_valid;
+static unsigned music_width, music_height;
+static uint8_t transition_picture[DOOM_MAX_WIDTH * 4 * DOOM_HEIGHT * 4 * 4];
+static bool transition_valid;
+static unsigned presentation_field, transition_field, transition_width, transition_height;
 
 /* Read the selection before window creation, too: the host probes the rate
  * before plugin activation to select its pacing and VSync policy. The normal
@@ -50,6 +58,8 @@ SNES_MOD_CONSTRUCTOR(RegisterDoomPresentation) {
 }
 
 void DoomPresentationReset(void) {
+    music_field_valid=music_picture_valid=false;
+    transition_valid=false;presentation_field=0;
     DoomRendererReset();
 }
 
@@ -83,7 +93,12 @@ void DoomPresentationBegin(unsigned number) {
 }
 
 void DoomPresentationEnd(const uint8_t *field, unsigned number) {
-    (void)field;
+    presentation_field=number;
+    if(field && !DoomMusicBusy()) {
+        memcpy(music_field,field,sizeof(music_field));
+        music_field_valid=true;
+        music_picture_valid=false;
+    }
     DoomRendererEndSimFrame(number);
     if (number % 120 == 0 && getenv("DOOM_RENDER_STATS")) {
         DoomRendererStats stats;
@@ -113,6 +128,12 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
     if (!dst || !field || width < DOOM_STOCK_WIDTH * (int)scale ||
         width > DOOM_MAX_WIDTH * (int)scale || height != DOOM_HEIGHT * (int)scale ||
         width % scale || pitch < (size_t)width * 4) return 0;
+    bool music_busy=DoomMusicBusy() && music_field_valid;
+    if(music_busy && music_picture_valid && music_width==(unsigned)width && music_height==(unsigned)height) {
+        for(int y=0;y<height;y++)memcpy(dst+y*pitch,music_picture+(size_t)y*width*4,(size_t)width*4);
+        return 1;
+    }
+    if(music_busy)field=music_field;
     uint8_t *output = dst;
     size_t output_pitch = pitch;
     width /= scale;
@@ -143,8 +164,29 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
         DoomRendererDrawWeapon(g_ppu, output, output_pitch, width * scale, height * scale, weight, world);
     }
     if(world)DoomRendererDrawMessages(output,output_pitch,width,scale);
-    DoomRendererDrawAutomap(output,output_pitch,width,scale,weight,world);
+    bool map=DoomRendererDrawAutomap(output,output_pitch,width,scale,weight,world);
     if(world)DoomRendererDrawMenu(output,output_pitch,width,scale);
+    /* Native mode flags change before their next complete raster/GSU frame.
+     * Bridge that short handoff with the last enhanced picture, instead of
+     * briefly displaying a centered native-resolution field. */
+    unsigned output_width=width*scale, output_height=height*scale;
+    if(!world && !map && transition_valid && DoomRendererTransitionPending() &&
+       presentation_field-transition_field<=12 &&
+       transition_width==output_width && transition_height==output_height) {
+        for(unsigned y=0;y<output_height;y++)
+            memcpy(output+y*output_pitch,transition_picture+(size_t)y*output_width*4,output_width*4);
+    } else if(world || map) {
+        transition_width=output_width;transition_height=output_height;
+        transition_field=presentation_field;transition_valid=true;
+        for(unsigned y=0;y<output_height;y++)
+            memcpy(transition_picture+(size_t)y*output_width*4,output+y*output_pitch,output_width*4);
+    }
+    if(music_busy) {
+        music_width=width*scale;music_height=height*scale;
+        for(unsigned y=0;y<music_height;y++)
+            memcpy(music_picture+(size_t)y*music_width*4,output+y*output_pitch,music_width*4);
+        music_picture_valid=true;
+    }
     return 1;
 }
 
@@ -157,6 +199,9 @@ int DoomPresentationKeepDebt(void) {
     /* A costly camera pass may miss a deadline. Keep simulation on its
      * original clock and catch up through cached presents, as F-Zero does,
      * instead of permanently turning each missed deadline into slow motion. */
+    /* A native menu is stationary. Discard old render debt so its newly
+     * uploaded text reaches the screen immediately on slow machines. */
+    if(DoomNativeMenuActive())return 0;
     return settings.widescreen || settings.fps_enabled || settings.resolution_enabled || transparent_map || DoomInputLookEnabled();
 }
 

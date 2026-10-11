@@ -2,6 +2,7 @@
  * rlstatus.a, rlmove4.a and rlautomap.a and guarded by opcode signatures.
  * Commands execute on the emulation thread at the player tick. */
 #include "doom_cheats.h"
+#include "doom_music.h"
 #include "common_cpu_infra.h"
 #include "mod_runtime.h"
 #include "snes/cart.h"
@@ -13,12 +14,18 @@
 static SuperFx *core;
 static int enabled, suspended, god, clip, map_mode, map_original;
 static unsigned field, last_tick;
-static char typed[9];
+static char typed[11];
 static unsigned length, pending;
 #if SNESRECOMP_TRACE
 static unsigned monster_arrows;
 #endif
-enum { God=1, Arsenal, Keys, Clip, Map, Warp=0x100 };
+enum { God=1, Arsenal, Keys, Clip, Map, Choppers, Radiation, Invisible,
+       Invulnerable, AreaMap, Visor, Strength, Warp=0x100, Music=0x400 };
+/* Retail pickup destinations, verified against _I* in rlmove8.a. */
+enum { RadCount=0x3c, BerserkCount=0x3e, InvulnerableCount=0x40,
+       LightGoggles=0x42, Berserk=0x44, ComputerMap=0x46,
+       PlayerArms=0x1d9, RLRGB=0x1da, WeaponNext=0x1e4,
+       InvisibleCount=0x1ea, PowerupDuration=60*60 };
 static unsigned Word(SuperFx *fx,unsigned p) {
     return superfx_ram_peek(fx,p)|(superfx_ram_peek(fx,p+1)<<8);
 }
@@ -35,6 +42,26 @@ static void SelectFace(SuperFx *fx,int invulnerable) {
     unsigned anim=invulnerable || Word(fx,0x40)?0xe8b8:
         !health?0xe9ae:0xe8e8+33*(health>=80?0:5-(health>>4));
     Put(fx,0x36,anim);Put(fx,0x38,anim);Put(fx,0x3a,1);
+}
+static void Powerup(SuperFx *fx,unsigned command,unsigned p) {
+    unsigned timer=command==Radiation?RadCount:command==Invisible?InvisibleCount:
+        command==Invulnerable?InvulnerableCount:command==Visor?LightGoggles:BerserkCount;
+    int active=Word(fx,timer)!=0 || (command==Strength && Word(fx,Berserk)!=0);
+    Put(fx,timer,active?0:PowerupDuration);
+    if(command==Strength) {
+        Put(fx,Berserk,active?0:PowerupDuration);
+        if(!active) {
+            if(Word(fx,p+32)<100)Put(fx,p+32,100);
+            Put(fx,WeaponNext,0); /* native lowering/raising selects the fist */
+        }
+    }
+    if(command==Invulnerable)SelectFace(fx,god);
+    if(command==Radiation || command==Strength) {
+        /* Clear the cancelled palette, retaining the other active powerup. */
+        unsigned rgb=active?(Word(fx,BerserkCount)?4:Word(fx,RadCount)?2:0):
+            command==Radiation?2:4;
+        Put(fx,RLRGB,rgb);
+    } else if(!active && Word(fx,RLRGB)==0xffff)Put(fx,RLRGB,6);
 }
 /* Missing PC maps are intentionally rejected rather than silently redirected. */
 static int Level(unsigned e,unsigned m) {
@@ -69,11 +96,23 @@ static void Tick(SuperFx *fx,uint32_t pc,void *context) {
         for(unsigned i=0;i<4;i++)Put(fx,0x5e + 2*i,ammo[i]*scale);
         Put(fx,0x1d4,200);fx->ram[0x1d9]=0xff;
         if(command==Keys)fx->ram[0x1d8]=0x3f;
+    } else if(command==Choppers) {
+        fx->ram[PlayerArms]|=8;
+        Put(fx,WeaponNext,6); /* switch even when the chainsaw was already owned */
+        if(Word(fx,RLRGB)==0xffff)Put(fx,RLRGB,6);
+    } else if(command==AreaMap) {
+        fx->ram[ComputerMap]=1;
+        if(map_mode)map_original=1; /* IDDT must not undo this pickup */
+        if(Word(fx,RLRGB)==0xffff)Put(fx,RLRGB,6);
+    } else if(command>=Radiation && command<=Strength && command!=AreaMap) {
+        Powerup(fx,command,p);
     } else if(command==Clip)clip=!clip;
     else if(command==Map) {
         if(!map_mode)map_original=fx->ram[0x46];
         map_mode=(map_mode+1)%3;
         fx->ram[0x46]=map_mode?1:(uint8_t)map_original;
+    } else if(command&Music) {
+        DoomMusicRequest(command&0xff);
     } else if(command&Warp) {
         /* ExitLevel $NN52: native RAGE4000 resets inventory and loads NN.
          * The native Level variable and NextLevelI retain normal exits. */
@@ -170,10 +209,11 @@ void DoomCheatsReset(void) {
     monster_arrows=0;
 #endif
 }
-void DoomCheatsShutdown(void) { Remove();DoomCheatsReset(); }
+void DoomCheatsShutdown(void) { Remove();DoomCheatsReset();DoomMusicReset(); }
 void DoomCheatsSuspended(int value) { suspended=value;length=pending=0; }
 void DoomCheatsBeforeFrame(void) {
     Settings();++field;
+    DoomMusicBeforeFrame(enabled && !suspended);
     SuperFx *fx=g_snes && g_snes->cart?g_snes->cart->superfx:NULL;
     if(fx!=core) { core=NULL;DoomCheatsReset(); }
     if(!enabled) {
@@ -191,10 +231,13 @@ void DoomCheatsBeforeFrame(void) {
 static void Character(int key) {
     if(key>='a' && key<='z')key-='a'-'A';
     if(!((key>='A' && key<='Z') || (key>='0' && key<='9'))) { length=0;return; }
-    if(length==8) { memmove(typed,typed+1,7);length--; }
+    if(length==sizeof(typed)-1) { memmove(typed,typed+1,length-1);length--; }
     typed[length++]=(char)key;typed[length]=0;
     static const struct { const char *text;unsigned command; } codes[]={
-        {"IDDQD",God},{"IDKFA",Keys},{"IDFA",Arsenal},{"IDCLIP",Clip},{"IDDT",Map}
+        {"IDDQD",God},{"IDKFA",Keys},{"IDFA",Arsenal},{"IDCLIP",Clip},{"IDDT",Map},
+        {"IDCHOPPERS",Choppers},{"IDBEHOLDR",Radiation},{"IDBEHOLDI",Invisible},
+        {"IDBEHOLDV",Invulnerable},{"IDBEHOLDA",AreaMap},{"IDBEHOLDL",Visor},
+        {"IDBEHOLDS",Strength}
     };
     for(unsigned i=0;i<sizeof(codes)/sizeof(*codes);i++) {
         unsigned n=(unsigned)strlen(codes[i].text);
@@ -202,9 +245,14 @@ static void Character(int key) {
             pending=codes[i].command;length=0;return;
         }
     }
-    if(length==8 && !memcmp(typed,"IDCLEV",6)) {
-        int level=Level(typed[6]-'0',typed[7]-'0');
+    if(length>=8 && !memcmp(typed+length-8,"IDCLEV",6)) {
+        int level=Level(typed[length-2]-'0',typed[length-1]-'0');
         if(level>=0)pending=Warp|(unsigned)level;
+        length=0;
+    }
+    if(length>=7 && !memcmp(typed+length-7,"IDMUS",5)) {
+        int level=Level(typed[length-2]-'0',typed[length-1]-'0');
+        if(level>=0)pending=Music|(unsigned)level;
         length=0;
     }
 }

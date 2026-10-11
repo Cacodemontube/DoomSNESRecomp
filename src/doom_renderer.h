@@ -7,6 +7,9 @@
 
 typedef struct SuperFx SuperFx;
 typedef struct Ppu Ppu;
+struct SaveLoadInfo;
+void DoomRendererSavePauseState(struct SaveLoadInfo *sli);
+bool DoomRendererLoadPauseState(struct SaveLoadInfo *sli);
 
 typedef struct DoomRendererStats {
     uint64_t captures, camera_passes, cache_hits, failures;
@@ -34,6 +37,7 @@ void DoomRendererSetResolution(unsigned scale);
 void DoomRendererSetLook(bool enabled, double horizon_offset);
 void DoomRendererSetTransparentMap(bool enabled);
 bool DoomRendererAutomapOverlay(void);
+bool DoomRendererTransitionPending(void);
 bool DoomRendererDrawAutomap(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,float alpha,bool world);
 bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
 void DoomRendererDrawMessages(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);

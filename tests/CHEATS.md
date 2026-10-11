@@ -7,6 +7,11 @@ case-insensitive; repeats, modifier shortcuts, focus loss and host panels do
 not complete codes. Commands execute at the native player tick, rather than
 changing game RAM from another thread.
 
+Cheat letters P and R do not trigger the desktop pause or PPU-switch
+diagnostics. Native Start/Enter opens Doom's menu; Ctrl+R still resets.
+Menu regression checks send IDCHOPPERS through SDL events as well as the
+native cheat hook, so host shortcut conflicts are covered.
+
 `IDDQD` grants exactly 100 health on activation, prevents both direct damage
 and health subtraction, and selects the original glowing-eye face animation.
 Pickup grins cannot replace this face. It leaves the timed invulnerability
@@ -16,6 +21,22 @@ restores the appropriate native face, including a real invulnerability pickup.
 `IDFA` and `IDKFA` set all eight weapon bits and 200 armor. Ammo capacities
 are 200 bullets, 50 shells, 50 rockets and 300 cells, doubled if a backpack is
 already owned. `IDFA` preserves keys; `IDKFA` grants all six key bits.
+
+`IDCHOPPERS` sets the chainsaw inventory bit and selects it through the
+native weapon lowering/raising transition, including when already owned.
+`IDBEHOLDR/I/V/L/S` toggle the native radiation suit, partial invisibility,
+invulnerability, light goggles and berserk state. Enabling uses the retail
+pickup timer of 3,600 VBlanks. Berserk also grants its persistent strength,
+heals to at least 100 and selects fists. Disabling clears both berserk fields
+without removing granted health. Invulnerability updates the native face;
+god mode remains independent. Cancelling radiation or berserk restores the
+palette of the other active powerup, or the normal palette.
+
+`IDBEHOLDA` grants ComputerMap without toggling it off. If IDDT is active,
+its saved map state also records the pickup so cycling IDDT cannot undo it.
+All toggles inspect native RAM, including powerups acquired in a level or
+restored from a save state. Retail pickup instructions in `rlmove8.a` are
+executed in the GSU tests to verify timers, healing and weapon selection.
 
 `IDCLIP` applies the native movement velocity without wall clipping, then
 runs the original sector unlink, BSP lookup, sector relink and line triggers.
@@ -33,6 +54,23 @@ native `$NN52` ExitLevel transition: black screen, new inventory, 100 health,
 updates the native Level variable, so later exits use the normal progression,
 including omitted-map skips and secret-map returns. It does not substitute a
 different difficulty to bypass SNES episode restrictions.
+
+`IDMUSxy` accepts the same 22 maps. It reads the retail level-to-song table
+and calls `_PlaySong`, which stops the previous song, uploads a different
+module when necessary, starts the selected song and fades it in. Repeated
+requests restart the current song. Maps that share a SNES track keep that
+original mapping.
+
+The CPU hook uses the native pause boundary, waits for the GSU to release
+the ROM bus and uses menu IRQ phases during the upload. It restores the
+menu return register widths and the IRQ/controller enable register disabled
+by module upload. The normal main-loop continuation restarts gameplay.
+The boundary also protects ordinary menus when the cheats mod is disabled.
+Level, position, difficulty and inventory are preserved.
+
+`tests/validate_music.ps1` checks all 22 codes with audio enabled, verifies
+the expected native song/module and gameplay resumption, checks unchanged
+player state, and requests E1M1 again twice to exercise repeated restarts.
 
 The hooks target the verified USA retail ROM and check every hook's opcode
 signature before installation. They are removed when the feature is disabled.

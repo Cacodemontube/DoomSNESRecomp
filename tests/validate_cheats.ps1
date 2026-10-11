@@ -71,6 +71,33 @@ try {
   do {Start-Sleep -Milliseconds 100;$s=Query 'game cheat_stats'} while($s.frame -lt 1400)
   if(!$s.ready -or !$s.enabled) {throw 'Cheat hooks did not reach gameplay.'}
   $expectedSkill=$s.skill
+  function Word([string]$address) {
+    $dump=Query ('read_sram '+$address+' 2')
+    $bytes=@($dump.hex -split ' ' | ForEach-Object {[Convert]::ToInt32($_,16)})
+    return $bytes[0]+256*$bytes[1]
+  }
+  $null=Query 'game cheat_test IDCHOPPERS';$null=Query 'step 120'
+  $s=Query 'game cheat_stats'
+  if(!($s.arms -band 8) -or (Word '1dc') -ne 6) {throw 'IDCHOPPERS did not grant and equip the chainsaw.'}
+  foreach($power in @(@('IDBEHOLDR','3c'),@('IDBEHOLDI','1ea'),@('IDBEHOLDV','40'),@('IDBEHOLDL','42'),@('IDBEHOLDS','3e'))) {
+    $null=Query ('game cheat_test '+$power[0]);$null=Query 'step 12'
+    $timer=Word $power[1]
+    if($timer -le 3500 -or $timer -gt 3600) {throw "$($power[0]) did not grant a native timed pickup."}
+    if($power[0] -eq 'IDBEHOLDS') {
+      $null=Query 'step 120';$s=Query 'game cheat_stats'
+      if($s.health -lt 100 -or (Word '1dc') -ne 0 -or !(Word '44')) {throw 'Berserk did not heal, grant strength and equip fists.'}
+    }
+    $null=Query ('game cheat_test '+$power[0]);$null=Query 'step 12'
+    if((Word $power[1]) -ne 0) {throw "$($power[0]) did not toggle off."}
+    if($power[0] -eq 'IDBEHOLDS' -and (Word '44') -ne 0) {throw 'Berserk strength remained active.'}
+  }
+  $null=Query 'game cheat_test IDBEHOLDA';$null=Query 'step 12'
+  $null=Query 'game cheat_test IDBEHOLDA';$null=Query 'step 12'
+  $mapPickup=Query 'read_sram 46 1'
+  if($mapPickup.hex -ne '01') {throw 'Computer map was not retained after repeated IDBEHOLDA.'}
+  # Native level initialization clears the permanent map for existing IDDT checks.
+  $null=Query 'game cheat_test IDCLEV11';$null=Query 'step 220'
+  Write-Output 'Chainsaw equip, all five powerup toggles, berserk fists and permanent computer map verified.'
   $null=Query 'game cheat_test IDDQD';$null=Query 'step 12';$s=Query 'game cheat_stats'
   if(!$s.god -or $s.health -ne 100 -or $s.face -ne 2) {throw 'God mode did not set health and glowing-eye face.'}
   $null=Query 'game cheat_test IDDQD';$null=Query 'step 12';$s=Query 'game cheat_stats'

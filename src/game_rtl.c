@@ -37,8 +37,48 @@
 #include "doom_renderer.h"
 #include "doom_input.h"
 #include "doom_cheats.h"
+#include "doom_music.h"
+#include "doom_ppu_state.h"
 
 #include "beam_frame_driver.h"
+#include "common_rtl.h"
+#include "snes/saveload.h"
+#include "snes/snes.h"
+#include <string.h>
+
+/* The generic SNES blob contains the interpreter CPU, not the native
+ * CpuState and beam driver's continuation. Resuming it without these
+ * restarts the reset vector over restored gameplay RAM. */
+static const uint32_t doom_state_marker[2] = {0x4d4f4f44u, 0x335845u};
+static bool DoomStatePreflight(const void *data, size_t size) {
+    return size >= sizeof(doom_state_marker) &&
+        !memcmp((const uint8_t *)data + size - sizeof(doom_state_marker),
+                doom_state_marker, sizeof(doom_state_marker));
+}
+static void DoomStateSave(SaveLoadInfo *sli) {
+    snes_beam_frame_driver_save_state(sli);
+    RtlSaveExecutionState(sli);
+    if(!DoomPpuSaveLoadAccess(g_snes->ppu,sli))RtlStateStreamFail(sli);
+    DoomRendererSavePauseState(sli);
+    uint32_t marker[2];memcpy(marker,doom_state_marker,sizeof(marker));
+    sli->func(sli,marker,sizeof(marker));
+}
+static void DoomStateLoad(SaveLoadInfo *sli, uint32_t version) {
+    (void)version;
+    bool valid=snes_beam_frame_driver_load_state(sli);
+    valid=RtlLoadExecutionState(sli) && valid;
+    valid=DoomPpuSaveLoadAccess(g_snes->ppu,sli) && valid;
+    valid=DoomRendererLoadPauseState(sli) && valid;
+    uint32_t marker[2]={0};sli->func(sli,marker,sizeof(marker));
+    if(!valid || memcmp(marker,doom_state_marker,sizeof(marker)))RtlStateStreamFail(sli);
+}
+static void DoomStateLoaded(uint32_t version) {
+    (void)version;
+    RtlApplyExecutionState();
+    /* The desktop's on_reset clears presentation/input adapters for visible
+     * timeline jumps. This hook also runs on speculative rollback, where
+     * destroying renderer history and worker threads every field is wrong. */
+}
 
 void GameRunOneFrame(void)
 {
@@ -59,6 +99,7 @@ void GameSessionReset(void)
     snes_beam_frame_driver_reset();
     DoomInputReset();
     DoomCheatsReset();
+    DoomMusicReset();
     DoomPresentationReset();
 }
 
@@ -69,4 +110,8 @@ const RtlGameInfo kGameInfo = {
     .draw_ppu_frame = &GameDrawPpuFrame,
     .save_name_prefix = "save",
     .session_reset = &GameSessionReset,
+    .snapshot_preflight = &DoomStatePreflight,
+    .state_save_extra = &DoomStateSave,
+    .state_load_extra = &DoomStateLoad,
+    .on_state_loaded = &DoomStateLoaded,
 };

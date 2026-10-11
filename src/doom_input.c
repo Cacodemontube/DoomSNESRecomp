@@ -8,7 +8,7 @@
 #include "desktop/sdl_compat.h"
 #include <string.h>
 
-static int enabled, look_enabled, invert_y, suspended, released;
+static int enabled, look_enabled, jump_enabled, invert_y, suspended, released;
 static double sensitivity = 1, yaw_counts, pitch;
 static SDL_Window *captured_window;
 static SuperFx *hook_core;
@@ -43,7 +43,8 @@ static void RemoveHooks(SuperFx *fx) {
 static void ReadSettings(void) {
     char value[32];
     enabled = snes_mod_runtime_feature_enabled_c("doom.presentation", "modern-controls");
-    look_enabled = enabled;
+    look_enabled = 0;
+    jump_enabled = 0;
     sensitivity = 1;
     invert_y = 0;
     if (snes_mod_runtime_feature_option_value_c("doom.presentation", "modern-controls",
@@ -53,7 +54,10 @@ static void ReadSettings(void) {
         else if (!strcmp(value, "2")) sensitivity = 2;
     }
     if (snes_mod_runtime_feature_option_value_c("doom.presentation", "modern-controls",
-        "vertical-look", value, sizeof(value))) look_enabled = enabled && strcmp(value, "off");
+        "vertical-look", value, sizeof(value))) look_enabled = enabled && !strcmp(value, "on");
+    if (snes_mod_runtime_feature_option_value_c("doom.presentation", "modern-controls",
+        "jumping", value, sizeof(value))) jump_enabled = enabled && !strcmp(value, "on");
+    if (!jump_enabled) jump_queued = 0;
     if (snes_mod_runtime_feature_option_value_c("doom.presentation", "modern-controls",
         "invert-y", value, sizeof(value))) invert_y = !strcmp(value, "on");
 }
@@ -230,7 +234,7 @@ int DoomInputRequestWeapon(unsigned slot) {
     queued_weapon=(int)slot;weapon_requests++;return 1;
 }
 int DoomInputRequestJump(void) {
-    if(!enabled || !gameplay || suspended)return 0;
+    if(!enabled || !jump_enabled || !gameplay || suspended)return 0;
     jump_queued=1;return 1;
 }
 
@@ -314,6 +318,13 @@ int DoomInputEvent(const void *opaque) {
      * Start button owns pausing; never pass P to the host pause shortcut. */
     if (event && (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
         SNESRECOMP_SDL_EVENT_KEY(*event) == SDLK_p) return 1;
+    /* R occurs in IDCHOPPERS and powerup cheats. The host's plain-R
+     * diagnostic switches to a PPU without BG/OBJ overlay extraction,
+     * erasing the enhanced pause menu and making scanout much slower.
+     * Keep modified shortcuts such as Ctrl+R (reset) available. */
+    if (event && (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
+        SNESRECOMP_SDL_EVENT_KEY(*event) == SDLK_r &&
+        !(SNESRECOMP_SDL_EVENT_MOD(*event) & (KMOD_CTRL|KMOD_ALT|KMOD_GUI))) return 1;
     if (!enabled) return 0;
 #if SNESRECOMP_SDL3
     int lost_focus = event->type == SDL_EVENT_WINDOW_FOCUS_LOST;

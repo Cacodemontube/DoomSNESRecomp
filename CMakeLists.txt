@@ -48,6 +48,7 @@ add_executable(DoomSNESRecomp
     src/doom_debug.c
     src/doom_input.c
     src/doom_cheats.c
+    src/doom_music.c
     src/doom_episodes.c
 )
 
@@ -135,6 +136,11 @@ include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
 # so this configures cleanly before any art is fetched.
 recomp_target_launcher_ui(DoomSNESRecomp CONSOLE snes
     BOXART "${CMAKE_SOURCE_DIR}/launcher_assets/img/boxart.tga")
+target_compile_definitions(DoomSNESRecomp PRIVATE DOOM_LAUNCHER=1)
+add_custom_command(TARGET DoomSNESRecomp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/logo1.png"
+            "$<TARGET_FILE_DIR:DoomSNESRecomp>/assets/img/logo1.png")
 
 # Generate & rebuild from inside the launcher: pick ROM -> recompile locally
 # -> cmake --build -> relaunch. The implementation is the framework's; this
@@ -239,6 +245,15 @@ if(BUILD_TESTING)
         target_link_libraries(doom_presentation_test PRIVATE m)
     endif()
     add_test(NAME doom_presentation COMMAND doom_presentation_test)
+
+    add_executable(doom_ppu_state_test tests/test_doom_ppu_state.c
+        snesrecomp/runner/src/snes/ppu_legacy.c)
+    target_include_directories(doom_ppu_state_test PRIVATE src snesrecomp/runner/src)
+    target_compile_definitions(doom_ppu_state_test PRIVATE SNESRECOMP_REVERSE_DEBUG=0)
+    if(NOT MSVC)
+        target_link_libraries(doom_ppu_state_test PRIVATE m)
+    endif()
+    add_test(NAME doom_ppu_state COMMAND doom_ppu_state_test)
 
     add_executable(doom_renderer_state_test tests/doom_renderer_state_test.c)
     target_include_directories(doom_renderer_state_test PRIVATE
