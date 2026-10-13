@@ -55,7 +55,7 @@ static void EndFrame(const uint8_t *field, unsigned number) {
 
 static void Reset(void) { DoomCheatsReset(); DoomInputReset(); DoomMusicReset(); DoomPresentationReset(); }
 static void Shutdown(void) { DoomEpisodesShutdown(); DoomCheatsShutdown(); DoomInputShutdown(); DoomPresentationReset(); }
-static void BeforeFrame(void) { DoomEpisodesBeforeFrame(); DoomCheatsBeforeFrame(); DoomInputBeforeFrame(); DoomPresentationBeforeFrame(); }
+static void BeforeFrame(void) { DoomEpisodesBeforeFrame(); DoomCheatsBeforeFrame(); DoomInputBeforeFrame(); DoomDebugApplyRequests(); DoomPresentationBeforeFrame(); }
 static int InputEvent(const void *event) { DoomCheatsEvent(event);return DoomInputEvent(event); }
 static void InputSuspended(int value) { DoomCheatsSuspended(value);DoomInputSuspended(value); }
 

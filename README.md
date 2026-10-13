@@ -87,7 +87,7 @@ Type the codes directly during gameplay; no console is needed.
 | `IDBEHOLDL` | Toggle the light amplification visor. |
 | `IDBEHOLDS` | Toggle berserk; enabling restores health to at least 100% and selects fists. |
 | `IDCLIP` | Toggle wall noclip. |
-| `IDDT` | Cycle full map, full map with living monsters as green arrows, and normal map. |
+| `IDDT` | Cycle full map, full map with living monsters and active projectiles as green arrows, and normal map. |
 | `IDCLEVxy` | Warp to episode `x`, mission `y`, with a black-screen transition and pistol start at the current difficulty. |
 | `IDMUSxy` | Restart the music from episode `x`, mission `y`, without changing the level or inventory. |
 
@@ -117,6 +117,7 @@ The option is off by default. Set player 1's input source to **Keyboard**.
 | W / S | Walk forward / backward |
 | A / D | Strafe left / right |
 | Shift | Run |
+| Ctrl (hold) | Crouch, when Crouching is enabled (off by default) |
 | E | Open doors and use switches |
 | Enter | Pause / resume the game |
 | Space | Jump |
@@ -132,10 +133,14 @@ The option is off by default. Set player 1's input source to **Keyboard**.
 | 6 | Plasma rifle if picked up |
 | 7 | BFG 9000 if picked up |
 | Tab | Automap |
+| + / =, - or keypad + / - | Zoom the automap in / out |
+| Mouse wheel | Zoom the automap in / out |
 | Home | Center the view |
 | Escape | Release the mouse; click to capture again |
 
-Move the mouse up/down to navigate the original menus; left-click confirms.
+The **Mouse skull pointer** option is on by default within modern controls.
+The animated skull follows the mouse; hover menu text and left-click to select.
+Turning it off restores relative up/down mouse navigation and click confirmation.
 Arrow keys and E also work. Ctrl+L opens the launcher. Legacy controls retain
 the original SNES weapon cycling; modern controls use the number keys.
 Sensitivity, invert-Y and the vertical-look toggle are in the same feature.
@@ -143,10 +148,19 @@ Mouse capture releases when focus is lost or a host panel opens.
 
 Horizontal turning uses the original SNES mouse conversion as its base.
 Vertical look shifts the rendered horizon in the style of classic FPS games.
+With interpolated frame rate disabled, vertical look follows the same native
+world-update cadence as ordinary movement and turning.
 The HUD and weapon stay fixed, and shooting retains SNES Doom's auto-aim.
 It works at native resolution, higher resolutions and widescreen. Vertical
 look uses the host world rasterizer and adds some rendering cost.
 See [implementation and validation](tests/MODERN_CONTROLS.md).
+
+Current source also includes the [v0.02 follow-up](tests/V002_FOLLOWUP.md).
+For machines that struggle, start with 2x resolution, widescreen off,
+60 interpolated FPS and run-ahead off. High-resolution world rendering runs on the CPU; higher refresh
+rates and run-ahead require additional headroom. Uncovered noclip rays now draw
+retained high-resolution imagery rather than stretched native pixels.
+Reduce to native resolution if 2x still misses the desired frame rate.
 
 Use **Ctrl+L** to reopen the launcher during play. The framework saves the
 selected options in its normal mod state beside the executable. Presentation

@@ -13,6 +13,8 @@ param(
   [switch]$Paced,
   [switch]$Desktop,
   [switch]$Audio,
+  [ValidateRange(0,4)][int]$RunAhead = 0,
+  [switch]$DisableWorldCache,
   [switch]$Capture,
   [switch]$StateDumps,
   [string]$RouteFile,
@@ -23,6 +25,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $source = (Resolve-Path $BinaryDirectory).Path
+$Rom = (Resolve-Path -LiteralPath $Rom).Path
 $root = Join-Path $repo ('build-lag-evidence/' + $RunLabel)
 if (Test-Path $root) { throw "Run exists: $root" }
 New-Item -ItemType Directory $root | Out-Null
@@ -92,12 +95,15 @@ $envs = @{
   SNESRECOMP_HOST_PROFILE_START_FRAME = '1358'
   SNESRECOMP_RUN_FRAMES = '2300'
   SNESRECOMP_DEBUG_PORT = $(if ($DebugPort -gt 0) { [string]$DebugPort } else { $null })
-  SNESRECOMP_RUNAHEAD = '0'
+  SNESRECOMP_RUNAHEAD = [string]$RunAhead
   SNESRECOMP_REWIND = '0'
   SNESRECOMP_PRESENT_LOG = $null
   SNESRECOMP_STATE_TRACE = $(if ($StateDumps) { Join-Path $root 'state-trace.csv' } else { $null })
   SNESRECOMP_DUMP_DIR = $(if ($StateDumps) { Join-Path $root 'dumps' } else { $null })
   DOOM_RENDER_STATS = '1'
+  DOOM_DISABLE_WORLD_CACHE = $(if($DisableWorldCache) {'1'} else {$null})
+  SNESRECOMP_HOST_PROFILE = '1'
+  SNESRECOMP_PHASE_MS = '1'
   SNESRECOMP_SCREENSHOT_DIR = $(if ($Capture) { Join-Path $root 'captures' } else { $null })
   SNESRECOMP_SCREENSHOT_FROM = [string]$CaptureFrom
   SNESRECOMP_SCREENSHOT_TO = [string]$CaptureTo
@@ -123,6 +129,8 @@ try {
   $sorted = @($intervals | Sort-Object)
   $summary = [ordered]@{ run=$RunLabel; resolutionScale=$ResolutionScale; aspect=$Aspect; enhancements=[bool]$Enhancements; widescreenOnly=[bool]$WidescreenOnly; interpolationOnly=[bool]$InterpolationOnly; requestedFps=$Fps; captures=[bool]$Capture; paced=[bool]$Paced; desktop=[bool]$Desktop; audio=[bool]$Audio; samples=$rows.Count; binarySha256=(Get-FileHash (Join-Path $root 'DoomSNESRecomp.exe')).Hash; romSha256=(Get-FileHash $Rom).Hash; meanIntervalMs=($intervals | Measure-Object -Average).Average; p95Ms=$sorted[[int](($sorted.Count-1)*0.95)]; p99Ms=$sorted[[int](($sorted.Count-1)*0.99)]; maxMs=($intervals | Measure-Object -Maximum).Maximum }
   foreach ($key in @('guest_ms','raster_ms','compose_ms','present_ms','hook_ms','wait_ms','guest_periods')) { $summary[$key] = ($rows | ForEach-Object { [double]$_.$key } | Measure-Object -Average).Average }
+  $summary['runAhead']=$RunAhead
+  $summary['worldCacheDisabled']=[bool]$DisableWorldCache
   $summary | ConvertTo-Json | Set-Content (Join-Path $root 'summary.json')
   $summary | ConvertTo-Json
 } finally {

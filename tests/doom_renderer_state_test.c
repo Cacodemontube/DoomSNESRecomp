@@ -6,6 +6,8 @@
 static bool music_busy;
 int DoomMusicBusy(void) { return music_busy; }
 int DoomNativeMenuActive(void) { return 0; }
+static bool test_pointer;
+int DoomInputMenuPointer(double *x,double *y) { if(x)*x=100;if(y)*y=70;return test_pointer; }
 
 #include <stdio.h>
 
@@ -105,7 +107,7 @@ bool PpuSetOverlayCapture(Ppu *ppu, PpuOverlaySource source,
 bool PpuSetOverlayOamRange(Ppu *ppu, uint8_t first, uint8_t count)
 {
     (void)ppu;
-    CHECK((first == 32 && count == 96) || (first == 0 && count == 128));
+    CHECK((first == 32 && count == 96) || (first == 0 && count == 128) || (first == 124 && count == 4));
     return true;
 }
 
@@ -400,7 +402,7 @@ int main(int argc, char **argv)
             .floor_height=0,.ceiling_height=64};
     }
     for (unsigned i = 0; i < 342*224; i++) output[i] = 0xffabcdef;
-    /* Exclude wall-image tables so the wall band retains the sentinel;
+    /* Exclude wall-image tables so the native wall band retains its pixels;
      * the real colormap allocation remains available for plane rendering. */
     size_t saved_rom_size = s.snapshot.rom_size;
     s.snapshot.rom_size = 0x1b0000;
@@ -465,10 +467,35 @@ int main(int argc, char **argv)
     CHECK(s.map_current.valid && s.map_current.count==1 && s.map_current.pose.zoom==0.25);
     CHECK(s.map_current.lines[0].x1==10 && s.map_current.lines[0].y2==40);
     CHECK(s.snapshot_map && s.has_snapshot && DoomRendererAutomapOverlay());
+    s.field+=4;WriteWord(fx.ram,kViewX,ReadWord(fx.ram,kViewX)+8);
+    Capture(&fx,kBsp,NULL);CHECK(s.has_previous && s.interval==4);
+    unsigned captures=s.stats.captures;
+    Camera map_previous=s.previous;
+    CaptureMapBegin(&fx,kMapA,NULL);
+    CHECK(s.has_previous && s.interval==4 && s.stats.captures==captures);
+    CHECK(!memcmp(&map_previous,&s.previous,sizeof(map_previous)));
+    memcpy(authentic,fx.ram,fx.ram_size);
     CHECK(!memcmp(authentic,fx.ram,fx.ram_size));free(authentic);
     ppu->inidisp=15;ppu->bgmode=3;ppu->screenEnabled[0]=1;
     DoomRendererObserveLine(ppu,kNativeViewY+1,NULL);
     CHECK(s.visible_rows[0] && (s.palettes[0][0xe1]>>24)==255);
+    /* New missiles must not inherit the shooter's interpolation endpoints. */
+    memset(s.visible_rows,1,sizeof(s.visible_rows));s.field=12;s.map_interval=4;
+    s.map_current.field=12;s.map_previous.valid=true;s.map_presented.valid=false;
+    s.map_previous.count=1;s.map_current.count=2;
+    unsigned imp=kObjects+kObjectSize,ball=kObjects+2*kObjectSize;
+    s.map_previous.lines[0]=(DoomMapLine){.x1=100,.y1=100,.x2=110,.y2=110,
+        .color=0x73,.object=imp,.edge=0,.object_type=8};
+    s.map_current.lines[0]=(DoomMapLine){.x1=20,.y1=20,.x2=30,.y2=30,
+        .color=0x73,.object=ball,.edge=0,.object_type=64};
+    s.map_current.lines[1]=(DoomMapLine){.x1=104,.y1=100,.x2=114,.y2=110,
+        .color=0x73,.object=imp,.edge=0,.object_type=8};
+    CHECK(DoomRendererDrawAutomap((uint8_t *)output,342*4,342,1,0,false));
+    CHECK(s.map_presented.lines[0].x1==20 && s.map_presented.lines[1].x1==100);
+    s.map_previous=s.map_current;s.map_current.count=1;s.map_current.lines[0]=s.map_previous.lines[1];
+    s.map_current.lines[0].x1=108;s.map_current.lines[0].x2=118;
+    CHECK(DoomRendererDrawAutomap((uint8_t *)output,342*4,342,1,0,false));
+    CHECK(s.map_presented.lines[0].x1==104); /* Missile disappeared; imp stays matched. */
     WriteWord(fx.ram,kAutoMap,0);DoomRendererPreparePpu(ppu);
     CHECK(!s.map_current.valid && !DoomRendererAutomapOverlay());
     /* Native menus retain their level snapshot beyond the normal history
@@ -504,6 +531,14 @@ int main(int argc, char **argv)
     CHECK(output[kNativeViewY*342+43+10]==0xff123456);
     CHECK(output[kNativeViewY*342+43+11]==0xffabcdef);
     CHECK(output[180*342+43+20]==0xff556677);
+    uint32_t *pointer_output=calloc(342*224,4);CHECK(pointer_output);
+    test_pointer=true;DoomRendererPreparePpu(ppu);
+    ppu->oam[248]=64|(56<<8);s.menu_objects[56*256+64]=0xff123abc;
+    DoomRendererDrawMenuPointer((uint8_t *)pointer_output,342*4,342,1);
+    CHECK(pointer_output[70*342+143]==0xff123abc);
+    CHECK(pointer_output[56*342+107]==0);
+    test_pointer=false;free(pointer_output);
+
     s.scene_brightness=0;DoomRendererDrawMenu((uint8_t *)output,342*4,342,1);
     CHECK(output[180*342+43+20]==0xff000000);
     /* A fresh-process paused snapshot must retain artwork the native menu
@@ -532,6 +567,51 @@ int main(int argc, char **argv)
     CHECK(DoomRendererDrawWeapon(ppu,(uint8_t *)output,342*4,342,224,0,true));
     CHECK(output[kNativeViewY*342+43+25]==0xff654321);
     music_busy=false;g_snes=NULL;
+    /* Empty noclip views are valid enhanced output, including an empty
+     * central camera and both empty wings. Uncovered pixels never inherit
+     * a magnified native frame, and cached world copies respect row masks. */
+    s.cached=true;s.widescreen=true;s.geometry_ready=false;
+    for(unsigned i=0;i<3;i++)memset(&s.resolution_scenes[i],0,sizeof(s.resolution_scenes[i]));
+    memset(s.visible_rows,1,sizeof(s.visible_rows));
+    uint32_t *void_image=malloc(684*448*4);CHECK(void_image);
+    for(unsigned i=0;i<684*448;i++)void_image[i]=0xff123456;
+    CHECK(DoomRendererDrawResolution((uint8_t *)void_image,684*4,342,2));
+    CHECK(void_image[46*684+40]==0xff000000 && void_image[46*684+643]==0xff000000);
+    CHECK(void_image[45*684+40]==0xff123456 && void_image[46*684+39]==0xff123456);
+    CHECK(s.resolution_cache_valid);
+    ((uint32_t *)s.resolution_cache)[0]=0xff765432;
+    s.resolution_cache_valid=false;s.geometry_ready=false;
+    CHECK(DoomRendererDrawResolution((uint8_t *)void_image,684*4,342,2));
+    CHECK(void_image[46*684+40]==0xff765432);
+    ((uint32_t *)s.resolution_cache)[0]=0xff000000;
+    void_image[46*684+40]=0xffabcdef;
+    CHECK(DoomRendererDrawResolution((uint8_t *)void_image,684*4,342,2));
+    CHECK(void_image[46*684+40]==0xff000000);
+    s.visible_rows[0]=false;void_image[46*684+40]=0xffabcdef;
+    CHECK(DoomRendererDrawResolution((uint8_t *)void_image,684*4,342,2));
+    CHECK(void_image[46*684+40]==0xffabcdef);
+    s.horizon_offset=12;
+    CHECK(DoomRendererDrawResolution((uint8_t *)void_image,684*4,342,2));
+    CHECK(s.resolution_cache_horizon==12);
+    s.palettes[1][0]=0xff987654;
+    CHECK(DoomRendererDrawResolution((uint8_t *)void_image,684*4,342,2));
+    CHECK(s.resolution_cache_palettes[1][0]==0xff987654);
+    free(void_image);DoomRendererReset();CHECK(!s.resolution_cache);
+    /* Original vertical look advances only at native scene capture boundaries. */
+    DoomRendererConfigure(&fx,false,false,256);
+    DoomRendererSetLook(true,12);DoomRendererConfigure(&fx,false,false,256);
+    WriteWord(fx.ram,kAutoMap,0);Capture(&fx,kBsp,NULL);
+    CHECK(DoomRendererLookOffset()==12);
+    DoomRendererSetLook(true,30);CHECK(DoomRendererLookOffset()==12);
+    s.field++;CHECK(DoomRendererLookOffset()==12);
+    Capture(&fx,kBsp,NULL);CHECK(DoomRendererLookOffset()==30);
+    DoomRendererSetLook(true,0);CHECK(DoomRendererLookOffset()==30);
+    Capture(&fx,kBsp,NULL);CHECK(DoomRendererLookOffset()==0);
+    DoomRendererConfigure(&fx,false,true,256);DoomRendererSetLook(true,-20);
+    CHECK(DoomRendererLookOffset()==-20);
+    DoomRendererConfigure(&fx,false,false,256);CHECK(DoomRendererLookOffset()==0);
+    Capture(&fx,kBsp,NULL);CHECK(DoomRendererLookOffset()==-20);
+    DoomRendererSetLook(false,20);CHECK(DoomRendererLookOffset()==0);
     DoomRendererConfigure(NULL, false, false, 256);
     free(output); free(ppu); free(fx.ram); free(fx.rom);
     puts("Doom renderer state tests passed");

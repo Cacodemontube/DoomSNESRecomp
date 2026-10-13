@@ -390,6 +390,13 @@ int main(void) {
     machine.cart = &cart;
     cart.superfx = &fx;
     settings_tests();
+    SetOptions(true,"16:9",false,"60");
+    double nx,ny;
+    CHECK(DoomPresentationMapPointer(960,540,1920,1080,&nx,&ny));
+    CHECK(fabs(nx-128)<0.001 && fabs(ny-112)<0.001);
+    SetOptions(false,"4:3",false,"60");
+    CHECK(!DoomPresentationMapPointer(0,540,1920,1080,&nx,&ny));
+    CHECK(!DoomPresentationMapPointer(NAN,540,1920,1080,&nx,&ny));
     resolution_fallback_tests();
     wide_transition_tests();
     fallback_test(256, false, false, 0.25);
@@ -419,6 +426,8 @@ int main(void) {
     for(unsigned i=0;i<256*224;i++)music_native[i]=0xff123456;
     fake_world=true;DoomPresentationEnd((uint8_t *)music_native,10);
     CHECK(DoomPresentationDraw((uint8_t *)music_output,256*4,(uint8_t *)music_native,256,224,1));
+    CHECK(music_output[22*256+100]==0);
+    CHECK(music_output[21*256+100]==0xff123456);
     fake_world=false;transition_pending=true;
     for(unsigned i=0;i<256*224;i++)music_native[i]=0xff654321;
     DoomPresentationEnd((uint8_t *)music_native,11);
@@ -432,3 +441,7 @@ int main(void) {
     puts("Doom presentation: mod queries, startup/resize policy, and guarded fallback passed");
     return 0;
 }
+
+void DoomRendererDrawMenuPointer(uint8_t *dst,size_t pitch,unsigned width,unsigned scale) { (void)dst;(void)pitch;(void)width;(void)scale; }
+
+double DoomRendererLookOffset(void) { return 0; }

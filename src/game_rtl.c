@@ -82,6 +82,7 @@ static void DoomStateLoaded(uint32_t version) {
 
 void GameRunOneFrame(void)
 {
+    if(RtlSpeculativeFrame())DoomInputSpeculativeFrame();
     snes_beam_frame_driver_run_frame();
 }
 
@@ -114,4 +115,7 @@ const RtlGameInfo kGameInfo = {
     .state_save_extra = &DoomStateSave,
     .state_load_extra = &DoomStateLoad,
     .on_state_loaded = &DoomStateLoaded,
+    .exec_state_bound = DoomInputRollbackBound,
+    .exec_state_save = DoomInputRollbackSave,
+    .exec_state_load = DoomInputRollbackLoad,
 };

@@ -1,0 +1,11 @@
+# Fixed E1M1 camera for repeated-presentation cost measurements.
+wait 400
+press start 1
+wait 150
+press start 1
+wait 150
+press a 1
+wait 150
+press a 1
+wait 1250
+quit

@@ -1,5 +1,15 @@
 # Modern keyboard and mouse
 
+**Mouse skull pointer** is on by default within this mod. It preserves the native
+animated skull, moves it to the mouse position, and selects native menu items on
+hover. Left-click confirms only when over an item. Keyboard navigation remains
+available. Disable the option to restore relative mouse menu navigation.
+See [latest follow-up](V004_FOLLOWUP.md) for validation.
+
+The current source adds hold-Ctrl crouching and +/- or mouse-wheel automap
+zoom. See [v0.02 follow-up and validation](V002_FOLLOWUP.md) for the native
+height/clearance behavior, run-ahead state restoration and measured costs.
+
 The default-off `modern-controls` feature lives in Doom Display Enhancements.
 It uses an activation plugin, not a presentation-only plugin: horizontal
 mouse movement changes gameplay. The keyboard adapter replaces player 1's

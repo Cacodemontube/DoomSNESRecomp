@@ -3,6 +3,12 @@
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 static void word(uint8_t *p, unsigned n) { p[0] = n; p[1] = n >> 8; }
 int main(void) {
+    for(int i=-131072;i<=131072;i++) {
+        double value=i/256.0;
+        CHECK(DoomResolutionPixelFloor(value)==(int)floor(value));
+        CHECK(DoomResolutionPixelFloor(nextafter(value,-INFINITY))==(int)floor(nextafter(value,-INFINITY)));
+        CHECK(DoomResolutionPixelFloor(nextafter(value,INFINITY))==(int)floor(nextafter(value,INFINITY)));
+    }
     uint8_t pixels[256], runs[] = {3,10,11,12,0xfd,22};
     CHECK(DoomResolutionDecodeColumn(runs,sizeof(runs),0,6,pixels));
     CHECK(!memcmp(pixels,(uint8_t[]){10,11,12,22,22,22},6));

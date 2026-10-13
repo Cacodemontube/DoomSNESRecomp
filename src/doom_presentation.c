@@ -11,6 +11,7 @@
 #include "snes/cart.h"
 
 #include <string.h>
+#include <math.h>
 
 static DoomVideoSettings settings;
 static DoomViewport viewport = {256, 0, 4.0 / 3.0};
@@ -148,17 +149,20 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
     }
     float weight = (float)DoomPresentationAlpha(&settings, alpha);
     DoomRendererRememberHud(field);
-    bool tilted = DoomInputLookEnabled() && DoomInputPitch() != 0;
+    bool tilted = DoomInputLookEnabled() && DoomRendererLookOffset() != 0;
     bool world = (settings.widescreen || settings.fps_enabled || settings.resolution_enabled || tilted || DoomRendererAutomapOverlay()) &&
         DoomRendererDraw(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight);
     if (scale == 1) {
         if (world && tilted && !settings.widescreen) DoomRendererDrawResolution(dst, pitch, width, 1);
         if (!world || DoomInputLookEnabled()) DoomRendererDrawWeapon(g_ppu, dst, pitch, width, height, weight, world);
     } else {
-        for (int y = 0; y < height * (int)scale; y++) {
-            uint32_t *row = (uint32_t *)(output + (size_t)y * output_pitch);
-            const uint32_t *source = (const uint32_t *)(dst + (size_t)(y / scale) * pitch);
-            for (int x = 0; x < width * (int)scale; x++) row[x] = source[x / scale];
+        for (int y = 0; y < height; y++) {
+            uint32_t *row = (uint32_t *)(output + (size_t)y * scale * output_pitch);
+            const uint32_t *source = (const uint32_t *)(dst + (size_t)y * pitch);
+            for (int x = 0; x < width; x++)
+                for(unsigned sx=0;sx<scale;sx++)row[x*scale+sx]=source[x];
+            for(unsigned sy=1;sy<scale;sy++)
+                memcpy((uint8_t *)row+sy*output_pitch,row,(size_t)width*scale*4);
         }
         if (world) DoomRendererDrawResolution(output, output_pitch, width, scale);
         DoomRendererDrawWeapon(g_ppu, output, output_pitch, width * scale, height * scale, weight, world);
@@ -166,6 +170,11 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
     if(world)DoomRendererDrawMessages(output,output_pitch,width,scale);
     bool map=DoomRendererDrawAutomap(output,output_pitch,width,scale,weight,world);
     if(world)DoomRendererDrawMenu(output,output_pitch,width,scale);
+    /* Native framebuffer scratch can bleed through its one-row top border
+     * during uploads. That border belongs to the black frame, not the world. */
+    if(world)for(unsigned y=22*scale;y<23*scale;y++)
+        memset(output+y*output_pitch,0,(size_t)width*scale*4);
+    DoomRendererDrawMenuPointer(output,output_pitch,width,scale);
     /* Native mode flags change before their next complete raster/GSU frame.
      * Bridge that short handoff with the last enhanced picture, instead of
      * briefly displaying a centered native-resolution field. */
@@ -188,6 +197,16 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
         music_picture_valid=true;
     }
     return 1;
+}
+int DoomPresentationMapPointer(double x,double y,int window_w,int window_h,
+                              double *native_x,double *native_y) {
+    if(!native_x || !native_y || !isfinite(x) || !isfinite(y))return 0;
+    DoomViewport view=DoomCalculateViewport(&settings,window_w,window_h);
+    DoomRect rect=DoomDestination(view,window_w,window_h);
+    if(rect.w<=0 || rect.h<=0 || x<rect.x || y<rect.y ||
+       x>=rect.x+rect.w || y>=rect.y+rect.h)return 0;
+    *native_x=(x-rect.x)*view.width/rect.w-view.extra;
+    *native_y=(y-rect.y)*224/rect.h;return 1;
 }
 
 double DoomPresentationRate(double refresh) {

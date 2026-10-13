@@ -176,11 +176,17 @@ static void MapNext(SuperFx *fx,uint32_t pc,void *context) {
 }
 static void MapObject(SuperFx *fx,uint32_t pc,void *context) {
     (void)pc;(void)context;
+    /* The native SMS at ed42 has already saved the advanced list cursor.
+     * Filtering before that store repeats a rejected object and hides later
+     * enemies until the movable-object count is exhausted. */
     unsigned p=superfx_reg(fx,0);
     if(p==Player(fx))return;
-    /* Enemy tags 6..14, living objects only; omit missiles and corpses. */
-    if(map_mode!=2 || !ValidPlayer(fx,p) || fx->ram[p+5]<6 ||
-       fx->ram[p+5]>14 || (int16_t)Word(fx,p+32)<=0)
+    /* Living enemies plus active fireballs, rockets and plasma. Projectiles
+     * do not use monster health; their object lifetime controls visibility. */
+    unsigned type=ValidPlayer(fx,p) ? fx->ram[p+5] : 255;
+    bool enemy=type>=6 && type<=14 && (int16_t)Word(fx,p+32)>0;
+    bool missile=type>=64 && type<=68;
+    if(map_mode!=2 || (!enemy && !missile))
         superfx_hook_redirect(fx,0xed2e);
 #if SNESRECOMP_TRACE
     else monster_arrows++;
@@ -196,7 +202,7 @@ static const CheatHook hooks[]={
     {0xa42f,"\x3d\xac\x8e\xbc\x3e\x56",6,Move},
     {0xa6c3,"\xa0\x16\x5c\xb6\x3d\x30",6,Sector},
     {0xed39,"\x05\xc8\x90\x41\xd1\xd0",6,MapNext},
-    {0xed42,"\x3e\xa1\x3c\x3e\x58",5,MapObject}
+    {0xed45,"\x3e\x58\x1d\x40\x3e\x54",6,MapObject}
 };
 static void Remove(void) {
     if(core)for(unsigned i=0;i<sizeof(hooks)/sizeof(*hooks);i++)

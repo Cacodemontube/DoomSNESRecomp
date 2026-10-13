@@ -45,6 +45,38 @@ static void PickupDone(SuperFx *fx,uint32_t pc,void *context) {
 static void PickupDrop(SuperFx *fx,uint32_t pc,void *context) {
     (void)pc;(void)context;superfx_hook_redirect(fx,(uint16_t)superfx_reg(fx,11));
 }
+static unsigned map_drawn[16],map_drawn_count;
+static void RecordMapObject(SuperFx *fx,uint32_t pc,void *context) {
+    (void)pc;(void)context;
+    CHECK(map_drawn_count<16);map_drawn[map_drawn_count++]=(uint16_t)(superfx_reg(fx,0)-8);
+    superfx_hook_redirect(fx,0xed2e);
+}
+static void MapListDone(SuperFx *fx,uint32_t pc,void *context) {
+    (void)pc;(void)context;superfx_hook_redirect(fx,0xf800);
+}
+static void CheckMapList(SuperFx *fx,unsigned player) {
+    /* Execute the retail iterator, including buffered cursor stores and free
+     * slots. A rejected item before the fireball must not hide its shooter. */
+    static const uint8_t loop[]={0xa0,0x4a,0x3f,0xdf,0x3d,0xa1,0x3c,0x3d,0xa0,0xbc,
+        0xe0,0x05,0xc8,0x90,0x41,0xd1,0xd0,0x09,0xfb,0xd1,0x3e,0xa1,0x3c,
+        0x3e,0x58,0x1d,0x40};
+    memcpy(fx->rom+0x6d2e,loop,sizeof(loop));fx->rom[0x7800]=0;fx->rom[0x7801]=1;
+    CHECK(superfx_set_pc_hook(fx,0xed47,RecordMapObject,NULL));
+    CHECK(superfx_set_pc_hook(fx,0xed03,MapListDone,NULL));
+    unsigned item=player+38,ball=player+76,imp=player+114;
+    fx->ram[item+5]=15;fx->ram[ball+5]=64;fx->ram[imp+5]=8;Put(fx,imp+32,60);
+    Put(fx,0x7000,item-1);Put(fx,0x7002,0xffff);Put(fx,0x7004,ball-1);Put(fx,0x7006,imp-1);
+    Put(fx,0x178,3);map_drawn_count=0;
+    superfx_set_reg(fx,0,player);superfx_set_reg(fx,1,0x7000);Run(fx,0xed42);
+    CHECK(map_drawn_count==3 && map_drawn[0]==player && map_drawn[1]==ball && map_drawn[2]==imp);
+    CHECK(Word(fx,0x78)==0x7008);
+    /* Expired fireball becomes a free processing slot; imp remains visible. */
+    Put(fx,0x7004,0xffff);Put(fx,0x178,2);map_drawn_count=0;
+    superfx_set_reg(fx,0,player);superfx_set_reg(fx,1,0x7000);Run(fx,0xed42);
+    CHECK(map_drawn_count==2 && map_drawn[0]==player && map_drawn[1]==imp);
+    CHECK(superfx_set_pc_hook(fx,0xed47,NULL,NULL));
+    CHECK(superfx_set_pc_hook(fx,0xed03,NULL,NULL));
+}
 int main(int argc,char **argv) {
     uint8_t *rom=calloc(1,0x200000),*ram=calloc(1,0x10000);CHECK(rom && ram);
     if(argc>1) {
@@ -168,6 +200,12 @@ int main(int argc,char **argv) {
     unsigned enemy=p+64;ram[enemy+5]=6;Put(fx,enemy+32,20);superfx_set_reg(fx,0,enemy);
     MapObject(fx,0,NULL);CHECK(!fx->redirect_pending);
     Put(fx,enemy+32,0);MapObject(fx,0,NULL);CHECK(fx->redirect_pending);
+    for(unsigned tag=64;tag<=68;tag++) {
+        fx->redirect_pending=false;ram[enemy+5]=(uint8_t)tag;
+        MapObject(fx,0,NULL);CHECK(!fx->redirect_pending);
+    }
+    fx->redirect_pending=false;ram[enemy+5]=69;MapObject(fx,0,NULL);CHECK(fx->redirect_pending);
+    CheckMapList(fx,p);
     Command(fx,"iddt");CHECK(!map_mode && !ram[0x46]);
     static const char *warps[]={"11","12","13","14","15","17","18","19","21","23","24","26","28","29","31","32","33","34","36","37","38","39"};
     for(unsigned i=0;i<sizeof(warps)/sizeof(*warps);i++) {

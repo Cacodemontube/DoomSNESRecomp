@@ -8,6 +8,7 @@
 #include "../src/doom_renderer.c"
 int DoomMusicBusy(void) { return 0; }
 int DoomNativeMenuActive(void) { return 0; }
+int DoomInputMenuPointer(double *x,double *y) { (void)x;(void)y;return 0; }
 void PpuClearOverlayCaptures(Ppu *ppu) { (void)ppu; }
 #include "../src/doom_sky.h"
 

@@ -20,12 +20,14 @@ typedef struct DoomRendererStats {
     unsigned weapon_tiles, resolution_scale, resolution_segments;
     unsigned recovered_edges;
     bool menu_active;
-    unsigned automap_lines;
+    unsigned automap_lines, automap_enemy_arrows, automap_projectile_arrows;
     uint64_t automap_draws, automap_interpolated_presentations;
+    uint64_t automap_world_interpolated_presentations;
     bool automap_active, automap_transparent;
     bool weapon_translucent;
     unsigned snapshot_interval;
     bool supported, has_snapshot;
+    double look_offset, requested_look_offset;
 } DoomRendererStats;
 
 /* All snapshots, geometry passes, and interpolation belong to presentation.
@@ -35,6 +37,7 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
 void DoomRendererPreparePpu(Ppu *ppu);
 void DoomRendererSetResolution(unsigned scale);
 void DoomRendererSetLook(bool enabled, double horizon_offset);
+double DoomRendererLookOffset(void);
 void DoomRendererSetTransparentMap(bool enabled);
 bool DoomRendererAutomapOverlay(void);
 bool DoomRendererTransitionPending(void);
@@ -42,6 +45,7 @@ bool DoomRendererDrawAutomap(uint8_t *dst,size_t pitch,unsigned width,unsigned s
 bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
 void DoomRendererDrawMessages(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
 void DoomRendererDrawMenu(uint8_t *dst, size_t pitch, unsigned width, unsigned scale);
+void DoomRendererDrawMenuPointer(uint8_t *dst,size_t pitch,unsigned width,unsigned scale);
 void DoomRendererRememberHud(const uint8_t *field);
 /* Called by the beam driver after each authentic visible scanline. */
 void DoomRendererObserveLine(const Ppu *ppu, unsigned line, void *context);

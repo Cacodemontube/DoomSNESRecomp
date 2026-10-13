@@ -4,6 +4,7 @@ param(
   [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string]$RunLabel,
   [ValidateSet(1,2,3,4)][int]$ResolutionScale = 1,
   [ValidateSet('4:3','16:9','32:9')][string]$Aspect = '4:3',
+  [ValidateRange(0,4)][int]$RunAhead = 0,
   [int]$DebugPort = 4395
 )
 $ErrorActionPreference = 'Stop'
@@ -30,6 +31,7 @@ enabled = true
 [feature.values]
 vertical-look = "on"
 jumping = "on"
+crouching = "on"
 [[feature]]
 package_id = "doom.presentation"
 id = "widescreen"
@@ -63,12 +65,12 @@ wait 150
 press a 1
 wait 150
 press a 1
-wait 1100
+wait 2100
 quit
 "@
 Set-Content -LiteralPath (Join-Path $root 'route.txt') -Value $route -Encoding ascii
 $envs = @{ SDL_VIDEODRIVER='dummy';SDL_AUDIODRIVER='dummy';SNESRECOMP_DEBUG_PORT=[string]$DebugPort;
-  SNESRECOMP_RUN_FRAMES='2200';SNESRECOMP_RUNAHEAD='0';SNESRECOMP_REWIND='0';DOOM_RENDER_STATS='1' }
+  SNESRECOMP_RUN_FRAMES='2600';SNESRECOMP_RUNAHEAD=[string]$RunAhead;SNESRECOMP_REWIND='0';DOOM_RENDER_STATS='1' }
 $previous = @{}
 $process = $null; $client = $null
 try {
@@ -125,6 +127,20 @@ try {
   }
   if($peak -le $floor -or (Word '5a9c') -ne $floor) { throw 'Jump did not rise and land on the original floor.' }
   Write-Output "Native weapon switches and jump verified; height=$($peak-$floor)."
+  $standing=Word '30'
+  $null=Query 'game modern_key_test ctrl';$null=Query 'step 36'
+  if((Word '30') -ne 21) {throw 'Crouch did not lower the native eye height.'}
+  $null=Query ('screenshot '+((Join-Path $root 'crouch.bmp') -replace '\\','/'))
+  $null=Query 'game modern_key_test release-ctrl';$null=Query 'step 60'
+  if((Word '30') -ne $standing) {throw 'Crouch release did not restore standing eye height.'}
+  $null=Query 'set_controller select';$null=Query 'step 12';$null=Query 'clear_controller';$null=Query 'step 36'
+  if(!(Word '1e6')) {throw 'Automap did not open.'}
+  $zoom=Word '68';$null=Query 'game modern_key_test +';$null=Query 'step 48'
+  $zoomIn=Word '68';if($zoomIn -le $zoom) {throw 'Modern automap zoom-in failed.'}
+  $null=Query 'game modern_key_test -';$null=Query 'step 48'
+  if((Word '68') -ge $zoomIn) {throw 'Modern automap zoom-out failed.'}
+  $null=Query 'set_controller select';$null=Query 'step 12';$null=Query 'clear_controller';$null=Query 'step 36'
+  Write-Output 'Native crouch eye height and automap zoom verified.'
   $before = Query 'read_sram 5a8e 38'
   $null = Query ('screenshot '+((Join-Path $root 'center.bmp') -replace '\\','/'))
   $null = Query 'set_controller l'

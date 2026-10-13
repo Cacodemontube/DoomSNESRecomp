@@ -1,3 +1,44 @@
+# v0.03
+
+- Corrected IDDT projectile tags and moved filtering after the native object-list
+  cursor save, preventing rejected objects from hiding later enemies.
+- Match enhanced automap arrow interpolation by native object and triangle edge,
+  keeping newly spawned projectiles separate from their shooters.
+- Sample vertical look with native world captures when interpolation is off.
+  Vertical look remains smooth when the interpolated frame-rate mod is enabled.
+  See tests/V005_FOLLOWUP.md for regression and live checks.
+
+- Added the default-on Mouse skull pointer option within modern controls.
+  The native animated skull follows the mouse; hover and click select menu items.
+- Show active fireballs, rockets and plasma alongside living monsters in the
+  second IDDT automap mode.
+- Clear the enhanced world's one-row top border to prevent native scratch
+  graphics flashing through it.
+- Reduce nearest-neighbor scaling work by expanding source pixels once and
+  copying repeated rows, with identical output. See tests/V004_FOLLOWUP.md.
+
+- Added an off-by-default Crouching option to modern controls. Hold Ctrl
+  for half-height eye and passage/
+  moving-ceiling clearance, with standing prevented under a low ceiling.
+  Crouch observers are installed only while crouching is needed.
+- Added automap zoom on +/=, -, keypad +/- and the mouse wheel. Restored
+  native zoom-out input that modern weapon-cycle suppression intercepted.
+- Rewind modern input/jump state during run-ahead and advance speculative
+  jump timing. Developer input requests now apply before real simulation.
+- Cache unchanged high-resolution world images and omit unused high-resolution
+  native texture-phase matching; HUD and overlays remain independently composed.
+- Keep enhanced output with empty noclip visibility cameras. Uncovered rays
+  retain previous high-resolution pixels for the original trailing-image effect,
+  rather than stretching native-resolution framebuffer pixels.
+- Fixed Ctrl+fire entering the OS window-drag loop while the mouse is captured.
+- Fixed translucent automap double captures erasing 3D interpolation history.
+- Removed per-texel library rounding calls while preserving sample coordinates.
+- Added opt-in SPC/DSP guest-sync timing and run-ahead/cache comparison options
+  to the performance harness. See tests/V002_FOLLOWUP.md for measurements.
+
+The reported Linux stutter/music crackle is not confirmed fixed. High resolution,
+widescreen, interpolation and run-ahead remain CPU-intensive, especially together.
+
 # v0.02
 
 - Windows x64 and x86, Linux x64, and native macOS Intel and Apple Silicon releases.

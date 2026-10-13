@@ -11,6 +11,7 @@ param(
   [switch]$Interpolate,
   [switch]$Menu,
   [switch]$Deep,
+  [switch]$Noclip,
   [string[]]$Warps=@('31','32','33','38','11')
 )
 $ErrorActionPreference='Stop'
@@ -155,6 +156,7 @@ try {
     if($enhancedMap -and (!$stats.automap_active -or !$stats.automap_lines -or !$stats.automap_draws)) {throw 'Enhanced automap did not draw.'}
     if($Automap -and $Transparent -and ($stats.failures -or !$stats.has_snapshot -or !$stats.camera_passes)) {throw 'Transparent automap world replay failed.'}
     if($Automap -and $Interpolate -and !$stats.automap_interpolated_presentations) {throw 'Automap did not interpolate.'}
+    if($Automap -and $Transparent -and $Interpolate -and !$stats.automap_world_interpolated_presentations) {throw 'Transparent automap background did not interpolate.'}
     if($Automap) {
       $null=Query 'set_controller y';$null=Query 'step 24';$null=Query 'clear_controller';$null=Query 'step 24'
       $null=Query ('screenshot '+((Join-Path $root ($warp+'-zoom.bmp')) -replace '\\','/'))
@@ -166,6 +168,17 @@ try {
       $null=Query ('screenshot '+((Join-Path $root ($warp+'-closed.bmp')) -replace '\\','/'))
     }
     Write-Output "Captured IDCLEV$warp at scale $Scale."
+    if($Noclip) {
+      $null=Query 'game cheat_test IDCLIP';$null=Query 'step 12'
+      $null=Query 'set_controller up';$null=Query 'step 240';$null=Query 'clear_controller'
+      for($turn=0;$turn -lt 8;$turn++) {
+        $null=Query 'set_controller right';$null=Query 'step 24';$null=Query 'clear_controller'
+        $stats=Query 'game presentation_stats'
+        if($stats.failures) {throw 'Noclip renderer replay failed.'}
+        $null=Query ('screenshot '+((Join-Path $root ($warp+'-noclip-'+$turn+'.bmp')) -replace '\\','/'))
+      }
+      $null=Query 'game cheat_test IDCLIP';$null=Query 'step 12'
+    }
   }
 } finally {
   $transcript|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $root 'tcp.json')

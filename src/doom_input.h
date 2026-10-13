@@ -1,5 +1,7 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
 void DoomInputReset(void);
 void DoomInputShutdown(void);
 void DoomInputBeforeFrame(void);
@@ -21,3 +23,13 @@ void DoomInputGetStats(DoomInputStats *out);
 int DoomInputMotion(double x, double y);
 int DoomInputRequestWeapon(unsigned slot);
 int DoomInputRequestJump(void);
+int DoomInputRequestCrouch(int held);
+int DoomInputRequestMapZoom(int steps);
+/* Host input state must rewind along with the guest during run-ahead. */
+size_t DoomInputRollbackBound(void);
+size_t DoomInputRollbackSave(void *data,size_t capacity);
+int DoomInputRollbackLoad(const void *data,size_t size);
+void DoomInputSpeculativeFrame(void);
+
+int DoomInputMenuPointer(double *x,double *y);
+int DoomInputMenuPosition(double x,double y,int click);

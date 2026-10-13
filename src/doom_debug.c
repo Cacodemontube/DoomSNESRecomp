@@ -21,6 +21,7 @@ static unsigned p1, p2, invisibility_ticks;
 static int requested_invisibility_ticks = -1;
 static int requested_motion, motion_x, motion_y;
 static int requested_key;
+static int requested_pointer,pointer_x,pointer_y,pointer_click;
 static DoomInputStats input_stats;
 static DoomCheatsStats cheat_stats;
 static char requested_cheat[11];
@@ -37,7 +38,7 @@ static double draw_total_ms, draw_max_ms;
 #define UNLOCK() SDL_AtomicUnlock(&lock)
 #endif
 
-void DoomDebugRecordFrame(unsigned number) {
+void DoomDebugApplyRequests(void) {
     /* Test requests are applied by the emulation thread at a completed field,
      * never by the TCP thread while CPU/GSU execution or replay is active. */
     LOCK();
@@ -45,6 +46,8 @@ void DoomDebugRecordFrame(unsigned number) {
     requested_invisibility_ticks = -1;
     int mouse_request = requested_motion, dx = motion_x, dy = motion_y;
     requested_motion = 0;
+    int pointer_request=requested_pointer,px=pointer_x,py=pointer_y,click=pointer_click;
+    requested_pointer=0;
     int key_request=requested_key;requested_key=0;
     char cheat_request[sizeof(requested_cheat)];
     memcpy(cheat_request,requested_cheat,sizeof(cheat_request));requested_cheat[0]=0;
@@ -68,8 +71,13 @@ void DoomDebugRecordFrame(unsigned number) {
     } else if(cheat_request[0])DoomCheatsTestText(cheat_request);
     if(level_exit)DoomCheatsTestExit();
     if (mouse_request) DoomInputMotion(dx, dy);
+    if(pointer_request)DoomInputMenuPosition(px,py,click);
     if(key_request) {
         if(key_request==SDLK_SPACE)DoomInputRequestJump();
+        else if(key_request==SDLK_LCTRL)DoomInputRequestCrouch(1);
+        else if(key_request==SDLK_RCTRL)DoomInputRequestCrouch(0);
+        else if(key_request==SDLK_PLUS)DoomInputRequestMapZoom(1);
+        else if(key_request==SDLK_MINUS)DoomInputRequestMapZoom(-1);
         else DoomInputRequestWeapon((unsigned)(key_request-SDLK_1));
     }
     SuperFx *fx = g_snes && g_snes->cart ? g_snes->cart->superfx : NULL;
@@ -78,6 +86,9 @@ void DoomDebugRecordFrame(unsigned number) {
         fx->ram[0x1ea] = (uint8_t)request;
         fx->ram[0x1eb] = (uint8_t)(request >> 8);
     }
+}
+void DoomDebugRecordFrame(unsigned number) {
+    SuperFx *fx = g_snes && g_snes->cart ? g_snes->cart->superfx : NULL;
     unsigned ticks = fx && fx->ram && fx->ram_size > 0x1eb
         ? fx->ram[0x1ea] | ((unsigned)fx->ram[0x1eb] << 8) : 0;
     DoomRendererStats snapshot;
@@ -138,13 +149,24 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
             f,s.enabled,s.ready,s.god,s.clip,s.map,s.health,s.armor,s.keys,s.arms,s.face,s.skill,s.level,s.x,s.y,s.ammo[0],s.ammo[1],s.ammo[2],s.ammo[3],s.monster_arrows);
         send(json);return 1;
     }
+    if(!strcmp(cmd,"menu_pointer_test")) {
+        int x,y,click;char extra;
+        if(sscanf(args,"%d %d %d %c",&x,&y,&click,&extra)!=3 ||
+           x<-1024 || x>1024 || y<0 || y>224 || (click!=0 && click!=1)) {
+            send("{\"error\":\"usage: menu_pointer_test <native x> <native y> <click 0|1>\"}");return 1;
+        }
+        LOCK();pointer_x=x;pointer_y=y;pointer_click=click;requested_pointer=1;UNLOCK();
+        send("{\"ok\":true,\"queued\":true}");return 1;
+    }
     if(!strcmp(cmd,"modern_key_test")) {
         int key=!strcmp(args,"space") ? SDLK_SPACE :
+            !strcmp(args,"ctrl") ? SDLK_LCTRL : !strcmp(args,"release-ctrl") ? SDLK_RCTRL :
+            !strcmp(args,"+") ? SDLK_PLUS : !strcmp(args,"-") ? SDLK_MINUS :
             strlen(args)==1 && args[0]>='1' && args[0]<='7' ? args[0] : 0;
         LOCK();int ready=input_stats.enabled && input_stats.gameplay;
         if(key && ready)requested_key=key;UNLOCK();
         send(key && ready ? "{\"ok\":true,\"queued\":true}" :
-            "{\"ok\":false,\"error\":\"usage during modern gameplay: modern_key_test <space|1..7>\"}");
+            "{\"ok\":false,\"error\":\"usage during modern gameplay: modern_key_test <space|1..7|ctrl|release-ctrl|+|->\"}");
         return 1;
     }
     if (!strcmp(cmd, "mouse_motion_test")) {
@@ -195,7 +217,7 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         send("{\"ok\":false,\"error\":\"presentation_stats takes no arguments\"}");
         return 1;
     }
-    char json[1536];
+    char json[1792];
     LOCK();
     snprintf(json, sizeof(json),
         "{\"ok\":true,\"frame\":%u,\"p1_input\":%u,\"p2_input\":%u,\"supported\":%s,\"has_snapshot\":%s,"
@@ -207,8 +229,9 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         "\"invisibility_ticks\":%u,\"resolution_scale\":%u,\"resolution_segments\":%u,"
         "\"recovered_edges\":%u,\"menu_active\":%s,"
         "\"automap_active\":%s,\"automap_transparent\":%s,\"automap_lines\":%u,"
-        "\"automap_draws\":%llu,\"automap_interpolated_presentations\":%llu,"
-        "\"draw_calls\":%llu,\"draw_total_ms\":%.6f,\"draw_max_ms\":%.6f}",
+        "\"automap_enemy_arrows\":%u,\"automap_projectile_arrows\":%u,\"automap_draws\":%llu,\"automap_interpolated_presentations\":%llu,"
+        "\"automap_world_interpolated_presentations\":%llu,"
+        "\"look_offset\":%.3f,\"requested_look_offset\":%.3f,\"draw_calls\":%llu,\"draw_total_ms\":%.6f,\"draw_max_ms\":%.6f}",
         frame, p1, p2, stats.supported ? "true" : "false", stats.has_snapshot ? "true" : "false",
         (unsigned long long)stats.captures, (unsigned long long)stats.camera_passes,
         (unsigned long long)stats.cache_hits, (unsigned long long)stats.failures,
@@ -221,8 +244,9 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         stats.resolution_scale, stats.resolution_segments,
         stats.recovered_edges,stats.menu_active ? "true" : "false",
         stats.automap_active ? "true" : "false",stats.automap_transparent ? "true" : "false",stats.automap_lines,
-        (unsigned long long)stats.automap_draws,(unsigned long long)stats.automap_interpolated_presentations,
-        draws, draw_total_ms, draw_max_ms);
+        stats.automap_enemy_arrows,stats.automap_projectile_arrows,(unsigned long long)stats.automap_draws,(unsigned long long)stats.automap_interpolated_presentations,
+        (unsigned long long)stats.automap_world_interpolated_presentations,
+        stats.look_offset,stats.requested_look_offset,draws, draw_total_ms, draw_max_ms);
     UNLOCK();
     send(json);
     return 1;

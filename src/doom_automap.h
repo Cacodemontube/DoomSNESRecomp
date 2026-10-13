@@ -10,7 +10,9 @@
 enum { DOOM_MAP_LINES = 2048 };
 typedef struct DoomMapLine {
     double x1,y1,x2,y2;
-    uint8_t color;
+    uint8_t color,edge;
+    uint16_t object;
+    uint8_t object_type;
 } DoomMapLine;
 typedef struct DoomMapPose { double x,y,angle,zoom; } DoomMapPose;
 typedef struct DoomMapFrame {

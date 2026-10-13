@@ -24,6 +24,12 @@ enum { DOOM_RES_SCREEN_PLANE = 4 };
  * distance. Together they sample one column per map unit, at every width.
  * The SNES aspect correction belongs to projection, not texture density. */
 #define DOOM_RES_WALL_TEXELS_PER_UNIT 1.0
+/* Raster sample coordinates are bounded to the signed-int range. Preserve
+ * floor's negative-coordinate behavior without a libm call for every texel. */
+static inline int DoomResolutionPixelFloor(double value) {
+    int truncated=(int)value;
+    return truncated-(truncated>value);
+}
 typedef struct DoomResolutionUv {
     float v, step;
     uint8_t u, y;
@@ -489,15 +495,17 @@ static inline void DoomResolutionPlane(DoomResolutionScene *scene,
     if (sector_index >= 205) return;
     const uint8_t *sector = scene->sectors + sector_index * 14;
     int height = DoomResolutionSigned(sector + (ceiling ? 4 : 2)) - scene->view_z;
+    unsigned dither_x=(unsigned)DoomResolutionPixelFloor(rx);
+    int sky_x=DoomResolutionPixelFloor(rx+108);
     for (int y = from; y < to; y++) {
         unsigned native_y = (unsigned)y / scale;
         if (!visible[native_y]) continue;
         unsigned color;
         double plane_depth = INFINITY;
         if (ceiling && (sector[0] & 0x80)) {
-            int sky_y = (int)floor((y + 0.5) / scale - scene->horizon_offset);
+            int sky_y = DoomResolutionPixelFloor((y + 0.5) / scale - scene->horizon_offset);
             color = rom[DoomSkyRomOffset((uint16_t)angle,
-                (int)floor(rx + 108), (unsigned)sky_y, scene->sky2)];
+                sky_x, (unsigned)sky_y, scene->sky2)];
         } else {
             bool cached=scene->plane_scale==scale && scene->plane_ready[sector_index][ceiling];
             double sy = ((y + 0.5) / scale - DOOM_RES_HORIZON - scene->horizon_offset);
@@ -505,7 +513,7 @@ static inline void DoomResolutionPlane(DoomResolutionScene *scene,
                 fabs(sy) > 1e-9 ? fabs(height * DOOM_RES_VERTICAL_FOCAL / sy) : 7168;
             plane_depth = depth;
             unsigned row = cached ? scene->plane_light[sector_index][ceiling][y] : DoomResolutionLight(scene, sector, depth, true);
-            row += (((unsigned)floor(rx) ^ native_y) & 1) ? 0 : 1;
+            row += ((dither_x ^ native_y) & 1) ? 0 : 1;
             color = rom[0x1cde00 + (scene->invulnerable ? 32 : row) * 256 + sector[8 + ceiling]];
         }
         ((uint32_t *)(dst + (size_t)(y + 23 * scale) * pitch))[x] =
@@ -628,7 +636,7 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
         unsigned native_y = (unsigned)y / scale;
         if (!visible[native_y]) continue;
         double texture_v=base-y*step;
-        unsigned v = (unsigned)(int)floor(texture_v) & (h - 1);
+        unsigned v = (unsigned)DoomResolutionPixelFloor(texture_v) & (h - 1);
         unsigned color = rom[light_base + column[v]];
         ((uint32_t *)(dst + (size_t)(y + 23 * scale) * pitch))[x] =
             palettes[native_y][color];
@@ -642,12 +650,18 @@ static inline int DoomResolutionClipY(double height, double depth,
     if (y >= max) return max;
     return (int)y;
 }
-static inline void DoomResolutionRasterColumn(DoomResolutionScene *scene,
+static inline void DoomResolutionRasterColumnRetained(DoomResolutionScene *scene,
     const uint8_t *rom, size_t rom_size, unsigned angle, double rx,
     double source_ray, double depth_ratio, unsigned x, unsigned scale,
     uint8_t *dst, size_t pitch, const uint32_t palettes[144][256],
-    const bool visible[144], double *depths) {
+    const bool visible[144], double *depths, bool retain_void) {
     if (depths) for (unsigned y = 0; y < 144 * scale; y++) depths[y] = INFINITY;
+    /* Noclip can expose rays with no sector or wall. Start each column
+     * with an explicit void rather than retaining the native framebuffer
+     * (or pixels from a previous camera) in uncovered portions. */
+    if(!retain_void)for (unsigned y = 0; y < 144 * scale; y++)
+        if (visible[y / scale])
+            ((uint32_t *)(dst + (y + 23 * scale) * pitch))[x] = 0xff000000u;
     DoomResolutionHit hits[DOOM_RES_SEGMENTS];
     unsigned count = DoomResolutionCollectHits(scene, source_ray, depth_ratio, hits,true);
     int top = 0, bottom = 144 * scale;
@@ -681,6 +695,14 @@ static inline void DoomResolutionRasterColumn(DoomResolutionScene *scene,
             bottom = start;
         }
     }
+}
+static inline void DoomResolutionRasterColumn(DoomResolutionScene *scene,
+    const uint8_t *rom,size_t rom_size,unsigned angle,double rx,
+    double source_ray,double depth_ratio,unsigned x,unsigned scale,
+    uint8_t *dst,size_t pitch,const uint32_t palettes[144][256],
+    const bool visible[144],double *depths) {
+    DoomResolutionRasterColumnRetained(scene,rom,rom_size,angle,rx,source_ray,
+        depth_ratio,x,scale,dst,pitch,palettes,visible,depths,false);
 }
 /* Read the fully resolved native WALLPLOT records after each private build.
  * Records for the three strips share immutable segment identity. */
@@ -841,7 +863,7 @@ static inline void DoomResolutionSprites(DoomResolutionScene *scene,
         int first=(int)fmax(0,fmin(144*scale,ceil(top-0.5)));
         int last=(int)fmax(0,fmin(144*scale,ceil(bottom-0.5)));
         if(!spread) {
-            int tu=(int)floor(u);
+            int tu=DoomResolutionPixelFloor(u);
             if(tu<0 || tu>=sprite->width)continue;
             const uint8_t *column=DoomResolutionSpriteColumn(scene,rom,size,sprite,(unsigned)tu);
             if(!column)continue;
@@ -850,7 +872,7 @@ static inline void DoomResolutionSprites(DoomResolutionScene *scene,
             for(int y=first;y<last;y++) {
                 unsigned ny=y/scale;
                 if(!visible[ny] || depth>depths[y]+0.001)continue;
-                int tv=(int)floor(vbase-(y+0.5)*vstep);
+                int tv=DoomResolutionPixelFloor(vbase-(y+0.5)*vstep);
                 if(tv<0 || tv>=sprite->height || !column[tv])continue;
                 unsigned mapped=rom[0x1c0000+(sprite->map<<8)+column[tv]];
                 ((uint32_t*)(dst+(size_t)(y+23*scale)*pitch))[x]=palettes[ny][mapped];
@@ -866,8 +888,8 @@ static inline void DoomResolutionSprites(DoomResolutionScene *scene,
             unsigned red=0,green=0,blue=0,covered=0;
             unsigned taps=spread>0 ? 4 : 1;
             for(unsigned tap=0;tap<taps;tap++) {
-                int tu=(int)floor(u+(tap&1 ? spread : -spread));
-                int tv=(int)floor(v+(tap&2 ? spread : -spread)*DOOM_FOCAL/vertical_focal);
+                int tu=DoomResolutionPixelFloor(u+(tap&1 ? spread : -spread));
+                int tv=DoomResolutionPixelFloor(v+(tap&2 ? spread : -spread)*DOOM_FOCAL/vertical_focal);
                 unsigned raw=0;
                 if(tu>=0 && tu<sprite->width && tv>=0 && tv<sprite->height) {
                     const uint8_t *column=DoomResolutionSpriteColumn(scene,rom,size,sprite,tu);

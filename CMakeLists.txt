@@ -74,7 +74,9 @@ snesrecomp_rom_identity(DoomSNESRecomp ${CMAKE_SOURCE_DIR}/rom_identity.txt)
 # That is what release zips contain; the player's machine produces the
 # playable binary from their own ROM. Without the option an empty src/gen/ is
 # still a hard error (the framework owns the message).
-snesrecomp_target_generated_code(DoomSNESRecomp ${CMAKE_SOURCE_DIR}/src/gen)
+set(DOOM_GENERATED_DIR "${CMAKE_SOURCE_DIR}/src/gen" CACHE PATH
+    "Generated code directory (may be outside the source tree)")
+snesrecomp_target_generated_code(DoomSNESRecomp ${DOOM_GENERATED_DIR})
 
 # The mod catalog. This names WHERE the packages are; the framework owns the
 # layout they are staged into beside the executable, and stages them on every
@@ -158,15 +160,178 @@ target_include_directories(DoomSNESRecomp PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(doom_radius_filter_test tests/test_doom_radius_filter.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_radius_filter_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_radius_filter COMMAND doom_radius_filter_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_radius_range_test tests/test_doom_radius_range.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_radius_range_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_radius_range COMMAND doom_radius_range_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_animation_queues_test tests/test_doom_animation_queues.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_animation_queues_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_animation_queues COMMAND doom_animation_queues_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_animation_iterator_test tests/test_doom_animation_iterator.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_animation_iterator_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_animation_iterator COMMAND doom_animation_iterator_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_movable_lifecycle_test tests/test_doom_movable_lifecycle.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_movable_lifecycle_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_movable_lifecycle COMMAND doom_movable_lifecycle_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_ammo_pickup_test tests/test_doom_ammo_pickup.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_ammo_pickup_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_ammo_pickup COMMAND doom_ammo_pickup_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_item_gate_test tests/test_doom_item_gate.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_item_gate_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_item_gate COMMAND doom_item_gate_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_object_contact_test tests/test_doom_object_contact.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_object_contact_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_object_contact COMMAND doom_object_contact_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_projectile_clearance_test tests/test_doom_projectile_clearance.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_projectile_clearance_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_projectile_clearance COMMAND doom_projectile_clearance_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_enemy_clearance_test tests/test_doom_enemy_clearance.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_enemy_clearance_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_enemy_clearance COMMAND doom_enemy_clearance_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_player_pipeline_test tests/test_doom_player_pipeline.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_player_pipeline_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_player_pipeline COMMAND doom_player_pipeline_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_bsp_sector_test tests/test_doom_bsp_sector.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_bsp_sector_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_bsp_sector COMMAND doom_bsp_sector_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_sector_links_test tests/test_doom_sector_links.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_sector_links_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_sector_links COMMAND doom_sector_links_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_slide_test tests/test_doom_slide.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_slide_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_slide COMMAND doom_slide_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_clipped_move_test tests/test_doom_clipped_move.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_clipped_move_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_clipped_move COMMAND doom_clipped_move_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_line_side_test tests/test_doom_line_side.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_line_side_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_line_side COMMAND doom_line_side_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_player_clearance_test tests/test_doom_player_clearance.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_player_clearance_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_player_clearance COMMAND doom_player_clearance_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_object_filter_test tests/test_doom_object_filter.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_object_filter_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_object_filter COMMAND doom_object_filter_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_move_sectors_test tests/test_doom_move_sectors.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_move_sectors_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_move_sectors COMMAND doom_move_sectors_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_move_candidates_test tests/test_doom_move_candidates.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_move_candidates_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_move_candidates COMMAND doom_move_candidates_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_move_coordinates_test tests/test_doom_move_coordinates.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_move_coordinates_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_move_coordinates COMMAND doom_move_coordinates_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    set(DOOM_REFERENCE_SOURCE_DIR "C:/projects/doom-fx-reference/source" CACHE PATH
+        "Original DOOM-FX assembly for source parity tests")
+    add_executable(doom_object_angle_test tests/test_doom_object_angle.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_object_angle_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${DOOM_REFERENCE_SOURCE_DIR}/sincos.a" AND EXISTS "${DOOM_REFERENCE_SOURCE_DIR}/InverseTable.bin")
+        add_test(NAME doom_object_angle COMMAND doom_object_angle_test
+            "${CMAKE_SOURCE_DIR}/Doom (USA).sfc" "${DOOM_REFERENCE_SOURCE_DIR}/InverseTable.bin"
+            "${DOOM_REFERENCE_SOURCE_DIR}/sincos.a")
+    else()
+        message(STATUS "Object-angle source oracle not registered: original assembly tables unavailable")
+    endif()
+    add_executable(doom_player_velocity_test tests/test_doom_player_velocity.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_player_velocity_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${DOOM_REFERENCE_SOURCE_DIR}/sincos.a")
+        add_test(NAME doom_player_velocity COMMAND doom_player_velocity_test
+            "${CMAKE_SOURCE_DIR}/Doom (USA).sfc" "${DOOM_REFERENCE_SOURCE_DIR}/sincos.a")
+    else()
+        message(STATUS "Physics source oracle not registered: set DOOM_REFERENCE_SOURCE_DIR to the original assembly source")
+    endif()
+    add_executable(doom_player_gate_test tests/test_doom_player_gate.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_player_gate_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_player_gate COMMAND doom_player_gate_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
+    add_executable(doom_gravity_test tests/test_doom_gravity.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_gravity_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_gravity COMMAND doom_gravity_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
     add_executable(doom_episodes_test tests/test_doom_episodes.c)
     target_include_directories(doom_episodes_test PRIVATE src ${SNESRECOMP_RUNNER_INCLUDE_DIRS})
-    add_test(NAME doom_episodes COMMAND doom_episodes_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_episodes COMMAND doom_episodes_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
     add_executable(doom_cheats_test tests/test_doom_cheats.c
         ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
     target_include_directories(doom_cheats_test PRIVATE src
         ${SNESRECOMP_RUNNER_INCLUDE_DIRS} ${SNESRECOMP_ROOT}/runner/src/desktop)
     snesrecomp_target_sdl(doom_cheats_test)
-    add_test(NAME doom_cheats COMMAND doom_cheats_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_cheats COMMAND doom_cheats_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
     add_executable(doom_input_test tests/test_doom_input.c)
     target_include_directories(doom_input_test PRIVATE src)
     if(NOT MSVC)

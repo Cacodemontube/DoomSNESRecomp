@@ -5,7 +5,7 @@ on:
       release_tag:
         description: Draft release containing temporary private build input
         required: true
-        default: v0.02
+        default: v0.03
       input_sha256:
         description: SHA256 of the temporary generated build input archive
         required: true
@@ -82,11 +82,11 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DSNESRECOMP_BUILD_VERSION=0.02 -DBUILD_TESTING=ON
+          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DSNESRECOMP_BUILD_VERSION=0.03 -DBUILD_TESTING=ON
           cmake --build build-release --parallel 4
           ctest --test-dir build-release --output-on-failure
           python scripts/stage_runtime.py --platform '${{ matrix.platform }}'
-          bash snesrecomp/tools/ci/bundle_runtime_libs.sh --exe 'dist/DoomSNESRecomp-v0.02-${{ matrix.platform }}/DoomSNESRecomp.exe' --build-dir build-release --strict
+          bash snesrecomp/tools/ci/bundle_runtime_libs.sh --exe 'dist/DoomSNESRecomp-v0.03-${{ matrix.platform }}/DoomSNESRecomp.exe' --build-dir build-release --strict
           python scripts/stage_runtime.py --platform '${{ matrix.platform }}' --zip
       - name: Install Linux build dependencies
         if: runner.os == 'Linux' && contains(fromJSON(inputs.platforms), matrix.platform)
@@ -105,11 +105,11 @@ jobs:
           if [[ '${{ runner.os }}' == macOS ]]; then
             extra+=(-DCMAKE_DISABLE_FIND_PACKAGE_Freetype=ON)
           fi
-          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DSNESRECOMP_BUILD_VERSION=0.02 -DBUILD_TESTING=ON -DCMAKE_BUILD_RPATH='$ORIGIN' "${extra[@]}"
+          cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DSNESRECOMP_BUILD_VERSION=0.03 -DBUILD_TESTING=ON -DCMAKE_BUILD_RPATH='$ORIGIN' "${extra[@]}"
           cmake --build build-release --parallel 3
           ctest --test-dir build-release --output-on-failure
           python scripts/stage_runtime.py --platform '${{ matrix.platform }}'
-          stage='dist/DoomSNESRecomp-v0.02-${{ matrix.platform }}'
+          stage='dist/DoomSNESRecomp-v0.03-${{ matrix.platform }}'
           bash snesrecomp/tools/ci/bundle_runtime_libs.sh --exe "$stage/DoomSNESRecomp" --build-dir build-release --strict
           if [[ '${{ runner.os }}' == macOS ]]; then
             find "$stage/libs" -name '*.dylib' -exec codesign --force --sign - {} \;
@@ -121,6 +121,6 @@ jobs:
         if: contains(fromJSON(inputs.platforms), matrix.platform)
         with:
           name: ${{ matrix.platform }}
-          path: dist/DoomSNESRecomp-v0.02-${{ matrix.platform }}.zip
+          path: dist/DoomSNESRecomp-v0.03-${{ matrix.platform }}.zip
           if-no-files-found: error
           retention-days: 7
