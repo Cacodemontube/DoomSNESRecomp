@@ -33,6 +33,12 @@ if not a.zip:
             dest=stage/'licenses'/path;dest.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(root/path,dest)
     sdl=build/'_deps/sdl3-src/LICENSE.txt'
+    if not sdl.is_file():
+        cache=build/'CMakeCache.txt'
+        for line in cache.read_text().splitlines() if cache.is_file() else []:
+            if line.startswith(('SDL3_SOURCE_DIR:','FETCHCONTENT_SOURCE_DIR_SDL3:')):
+                candidate=pathlib.Path(line.split('=',1)[1])/'LICENSE.txt'
+                if candidate.is_file():sdl=candidate;break
     if not sdl.is_file():raise RuntimeError('SDL3 license missing')
     (stage/'licenses/SDL3').mkdir(parents=True,exist_ok=True)
     shutil.copy2(sdl,stage/'licenses/SDL3/LICENSE.txt')
