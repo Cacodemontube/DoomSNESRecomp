@@ -4,7 +4,9 @@
 A still in development, native PC port of SNES Doom! 
 With a bunch of quality of life improvements and much more to come!
 
-## Release v0.02
+## Release v0.04
+
+Download [DoomSNESRecomp v0.04](https://github.com/Cacodemontube/DoomSNESRecomp/releases/tag/v0.04).
 
 Download the Windows **x64** or **x86**, Linux **x64**, or macOS **Intel / Apple
 Silicon** ZIP from GitHub Releases and extract the whole archive. On Windows,
