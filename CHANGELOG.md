@@ -1,3 +1,22 @@
+# v0.04
+
+- Improved rendering performance with cached texture decoding, prepared
+  geometry/ray data, parallel rendering and reuse of unchanged world images.
+- Recover the camera worker after temporary overload instead of keeping the
+  slower fallback active for the rest of a session.
+- Reduced slow-turn movement jitter while preserving native gameplay timing.
+- Fixed widescreen geometry discontinuities with merged visibility and edge
+  recovery, including native resolution with enemy rotations disabled.
+- Fixed sprites flickering on cached widescreen frames and preserved paired
+  columns at raster-worker boundaries.
+- Added optional PC enemy/projectile rotations, monster infighting and an
+  auto-aim crosshair. Rotations use the player's own full Doom/Ultimate Doom WAD.
+- Corrected native sprite identity and Spiderdemon walking-frame orientation.
+- Windows starts without a separate console window.
+
+Use your own Doom (USA).sfc ROM. Enhancements remain optional. Performance
+depends on hardware and the selected resolution, aspect and presentation rate.
+
 # v0.03
 
 - Corrected IDDT projectile tags and moved filtering after the native object-list

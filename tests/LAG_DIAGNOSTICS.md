@@ -42,6 +42,13 @@ Neither capture option should be used for precision performance runs.
 
 ## TCP renderer and input telemetry
 
+For renderer/VSync comparisons on the affected Windows PC, use
+[the interpolation comparison harness](INTERPOLATION_OPTIMIZATION.md#comparing-the-affected-pc).
+`measure_lag.ps1` accepts `-Renderer`, `-VSync` and an optional `-ConfigTemplate`.
+It clears inherited shader settings; an explicit `-Shader` requires
+`-Desktop -Renderer opengl`. The summary distinguishes guest fields per second
+from presentations per second and includes gameplay audio-starvation deltas.
+
 Configure with `-DSNESRECOMP_ENABLE_TRACE=ON`, build, and set
 `SNESRECOMP_DEBUG_PORT=4389` before launching the developer binary. The shared
 server uses line-based text requests and JSON responses. Send:

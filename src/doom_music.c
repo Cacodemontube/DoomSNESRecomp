@@ -86,7 +86,7 @@ void DoomMusicBeforeFrame(int enabled) {
     allowed=0;
     Cart *cart=g_snes?g_snes->cart:NULL;
     if(!enabled && !waiting && !playing)requested=0;
-    if(!cart || !cart->rom || cart->romSize!=0x200000 || !g_snes->ram ||
+    if(!cart || !cart->rom || (cart->romSize!=0x200000 && cart->romSize!=0x400000) || !g_snes->ram ||
        memcmp(cart->rom+0xefeb4,song_signature,sizeof(song_signature)) ||
        memcmp(g_snes->ram+0x205c,main_signature,sizeof(main_signature)) ||
        memcmp(g_snes->ram+0x20e4,boundary_signature,sizeof(boundary_signature)))return;

@@ -33,6 +33,12 @@
 #include "doom_cheats.h"
 #include "doom_episodes.h"
 #include "doom_music.h"
+#include "doom_crosshair.h"
+#include "doom_infighting.h"
+#include "doom_editor.h"
+#ifdef DOOM_DIAGNOSTIC_BUILD
+#include "doom_diagnostic.h"
+#endif
 #include "snesrecomp_rom_identity.h"  /* generated from rom_identity.txt */
 
 #ifndef __ANDROID__
@@ -54,8 +60,8 @@ static void EndFrame(const uint8_t *field, unsigned number) {
 }
 
 static void Reset(void) { DoomCheatsReset(); DoomInputReset(); DoomMusicReset(); DoomPresentationReset(); }
-static void Shutdown(void) { DoomEpisodesShutdown(); DoomCheatsShutdown(); DoomInputShutdown(); DoomPresentationReset(); }
-static void BeforeFrame(void) { DoomEpisodesBeforeFrame(); DoomCheatsBeforeFrame(); DoomInputBeforeFrame(); DoomDebugApplyRequests(); DoomPresentationBeforeFrame(); }
+static void Shutdown(void) { DoomEditorShutdown(); DoomEpisodesShutdown(); DoomCheatsShutdown(); DoomInfightingShutdown(); DoomInputShutdown(); DoomPresentationReset(); }
+static void BeforeFrame(void) { DoomEditorBeforeFrame(); DoomEpisodesBeforeFrame(); DoomCheatsBeforeFrame(); DoomInfightingBeforeFrame(); DoomInputBeforeFrame(); DoomDebugApplyRequests(); DoomPresentationBeforeFrame(); }
 static int InputEvent(const void *event) { DoomCheatsEvent(event);return DoomInputEvent(event); }
 static void InputSuspended(int value) { DoomCheatsSuspended(value);DoomInputSuspended(value); }
 
@@ -65,6 +71,7 @@ static int DrawFrame(uint8_t *dst, size_t pitch, const uint8_t *field,
     Uint64 start = SDL_GetPerformanceCounter();
 #endif
     int result = DoomPresentationDraw(dst, pitch, field, width, height, alpha);
+    if(result)DoomCrosshairDraw(dst,pitch,(unsigned)width,(unsigned)height);
 #if SNESRECOMP_TRACE
     DoomDebugRecordDraw(1000.0 * (double)(SDL_GetPerformanceCounter() - start) /
                         (double)SDL_GetPerformanceFrequency());
@@ -74,7 +81,11 @@ static int DrawFrame(uint8_t *dst, size_t pitch, const uint8_t *field,
 
 static const SnesDesktopHostGame kGameHost = {
     .display_name        = "Doom",
+#ifdef DOOM_DIAGNOSTIC_BUILD
+    .window_title        = "Doom - diagnostic build",
+#else
     .window_title        = "Doom",
+#endif
     .region              = SNESRECOMP_ROM_REGION,
     .rom_file            = SNESRECOMP_ROM_FILE,
     .expected_sha256_hex = SNESRECOMP_ROM_EXPECTED_SHA256,
@@ -88,6 +99,10 @@ static const SnesDesktopHostGame kGameHost = {
     .sram_path           = "saves/save.srm",
     .in_game_launcher    = 1,
     .on_reset            = Reset,
+#ifdef DOOM_SNESED_TEST
+    .on_rom_loaded       = DoomEditorRomLoaded,
+    .prepare_netplay     = DoomEditorNetplay,
+#endif
     .on_shutdown         = Shutdown,
     .before_run_frame    = BeforeFrame,
     .prepare_frame       = DoomPresentationPrepare,
@@ -109,6 +124,24 @@ static const SnesDesktopHostGame kGameHost = {
 #endif
 int main(int argc, char **argv)
 {
+#ifdef DOOM_SNESED_TEST
+    if(!DoomEditorConfigure(&argc,argv))return 2;
+#endif
+#ifdef DOOM_DIAGNOSTIC_BUILD
+    if (!DoomDiagnosticBegin()) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Doom diagnostic build",
+            "Could not create diagnostic files. Extract the build into a writable folder and try again.", NULL);
+        return 1;
+    }
+#endif
     DoomDebugInit();
-    return snesrecomp_desktop_main(&kGameHost, argc, argv);
+    SnesDesktopHostGame host=kGameHost;
+#ifdef DOOM_SNESED_TEST
+    if(DoomEditorModifiedSha()){host.expected_sha256_hex=DoomEditorModifiedSha();host.expected_crc32_hex=DoomEditorModifiedCrc();}
+#endif
+    int result = snesrecomp_desktop_main(&host, argc, argv);
+#ifdef DOOM_DIAGNOSTIC_BUILD
+    DoomDiagnosticFinish(result);
+#endif
+    return result;
 }

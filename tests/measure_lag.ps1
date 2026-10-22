@@ -1,9 +1,11 @@
 param(
   [string]$BinaryDirectory = './build',
+  [string]$ConfigTemplate,
   [string]$Rom = 'C:/Roms/Doom (USA).sfc',
   [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string]$RunLabel,
   [switch]$Enhancements,
   [switch]$ModernControls,
+  [switch]$VerticalLook,
   [switch]$TransparentAutomap,
   [ValidateSet(0,2,3,4)][int]$ResolutionScale = 0,
   [ValidateSet('Fit','4:3','16:9','21:9','32:9')][string]$Aspect = 'Fit',
@@ -12,6 +14,9 @@ param(
   [ValidateSet('Auto','60','90','120','144','165','240','360')][string]$Fps = 'Auto',
   [switch]$Paced,
   [switch]$Desktop,
+  [ValidateSet('auto','direct3d11','direct3d12','opengl','vulkan','gpu','software')][string]$Renderer = 'auto',
+  [ValidateSet('0','1','adaptive')][string]$VSync = '0',
+  [string]$Shader,
   [switch]$Audio,
   [ValidateRange(0,4)][int]$RunAhead = 0,
   [switch]$DisableWorldCache,
@@ -25,7 +30,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $source = (Resolve-Path $BinaryDirectory).Path
+if (!$ConfigTemplate) {
+  $ConfigTemplate = Join-Path $source 'config.ini'
+  if (!(Test-Path -LiteralPath $ConfigTemplate)) { $ConfigTemplate = Join-Path $repo 'build/config.ini' }
+}
+$ConfigTemplate = (Resolve-Path -LiteralPath $ConfigTemplate).Path
 $Rom = (Resolve-Path -LiteralPath $Rom).Path
+if ($Shader) {
+  if (!$Desktop -or $Renderer -ne 'opengl') { throw '-Shader requires -Desktop -Renderer opengl.' }
+  $Shader = (Resolve-Path -LiteralPath $Shader).Path
+}
 $root = Join-Path $repo ('build-lag-evidence/' + $RunLabel)
 if (Test-Path $root) { throw "Run exists: $root" }
 New-Item -ItemType Directory $root | Out-Null
@@ -33,11 +47,12 @@ Copy-Item (Join-Path $source 'DoomSNESRecomp.exe') $root
 Get-ChildItem $source -Filter '*.dll' | Copy-Item -Destination $root
 New-Item -ItemType Directory (Join-Path $root 'mods/preloaded') -Force | Out-Null
 Copy-Item (Join-Path $source 'mods/preloaded/packages') (Join-Path $root 'mods/preloaded') -Recurse
-if ($Enhancements -or $WidescreenOnly -or $InterpolationOnly -or $ResolutionScale -or $ModernControls -or $TransparentAutomap) {
+if ($Enhancements -or $WidescreenOnly -or $InterpolationOnly -or $ResolutionScale -or $ModernControls -or $VerticalLook -or $TransparentAutomap) {
   $wide = if ($Enhancements -or $WidescreenOnly) { 'true' } else { 'false' }
   $resolution = if ($ResolutionScale) { 'true' } else { 'false' }
   $interpolate = if ($Enhancements -or $InterpolationOnly) { 'true' } else { 'false' }
-  $modern = if ($ModernControls) { 'true' } else { 'false' }
+  $modern = if ($ModernControls -or $VerticalLook) { 'true' } else { 'false' }
+  $vertical = if ($VerticalLook) { 'on' } else { 'off' }
   $transparent = if ($TransparentAutomap) { 'true' } else { 'false' }
   $state = @"
 format_version = 1
@@ -66,6 +81,8 @@ scale = "$ResolutionScale"
 package_id = "doom.presentation"
 id = "modern-controls"
 enabled = $modern
+[feature.values]
+vertical-look = "$vertical"
 [[feature]]
 package_id = "doom.presentation"
 id = "transparent-automap"
@@ -75,14 +92,23 @@ enabled = $transparent
 } else {
   Set-Content (Join-Path $root 'mods/preloaded/state.toml') "format_version = 1" -Encoding ascii
 }
-$config = Get-Content (Join-Path $repo 'build/config.ini') -Raw
+$config = Get-Content -LiteralPath $ConfigTemplate -Raw
 $config = $config -replace '(?m)^SkipLauncher\s*=\s*[^\r\n]*','SkipLauncher = 1'
 $config = $config -replace '(?m)^Autosave\s*=\s*[^\r\n]*','Autosave = 0'
 $config = $config -replace '(?m)^DisableFrameDelay\s*=\s*[^\r\n]*', ('DisableFrameDelay = ' + [int](!$Paced))
 $config = $config -replace '(?m)^EnableAudio\s*=\s*[^\r\n]*', ('EnableAudio = ' + [int][bool]$Audio)
 $output = if ($Desktop) { 'SDL' } else { 'SDL-Software' }
 $config = $config -replace '(?m)^OutputMethod\s*=\s*[^\r\n]*', ('OutputMethod = ' + $output)
-$config = $config -replace '(?m)^VSync\s*=\s*[^\r\n]*','VSync = 0'
+$config = $config -replace '(?m)^VSync\s*=\s*[^\r\n]*', ('VSync = ' + $VSync)
+$config = $config -replace '(?m)^Shader\s*=\s*[^\r\n]*', ('Shader = ' + $Shader)
+# Renderer overrides OutputMethod in newer hosts. Always set both so a saved
+# hardware choice cannot accidentally turn a dummy-video run into a GL run.
+$rendererChoice = if ($Desktop) { $Renderer } else { 'software' }
+if ($config -match '(?m)^Renderer\s*=') {
+  $config = $config -replace '(?m)^Renderer\s*=\s*[^\r\n]*', ('Renderer = ' + $rendererChoice)
+} else {
+  $config = $config -replace '(?m)^\[Graphics\]\s*$', ("[Graphics]`r`nRenderer = " + $rendererChoice)
+}
 # Script input is the sole input source in an isolated measurement.
 $config = $config -replace '(?m)^SourceP1\s*=\s*[^\r\n]*','SourceP1 = 0'
 $config = $config -replace '(?m)^SourceP2\s*=\s*[^\r\n]*','SourceP2 = 0'
@@ -123,6 +149,8 @@ try {
   Write-Output "Run $RunLabel PID=$($process.Id) root=$root"
   $process.WaitForExit()
   if ($process.ExitCode -ne 0) { throw "Game exit: $($process.ExitCode)" }
+  $replayFailures = @(Get-Content (Join-Path $root 'stderr.log') | Select-String '\[doom-replay-failed\]|\[doom-render\].*\bfailures=[1-9]')
+  if ($replayFailures.Count) { throw 'Presentation replay failed; native fallback timings are not a valid enhancement benchmark. See stderr.log.' }
   $rows = @(Import-Csv (Join-Path $root 'timing.csv') | Where-Object { [int]$_.frame -ge 1400 -and [int]$_.frame -le 1900 })
   if ($rows.Count -lt 2) { throw 'Route did not reach the measured gameplay field window (1400-1900).' }
   $intervals = for ($i=1; $i -lt $rows.Count; $i++) { 1000 * ([double]$rows[$i].present_seconds - [double]$rows[$i-1].present_seconds) }
@@ -130,7 +158,20 @@ try {
   $summary = [ordered]@{ run=$RunLabel; resolutionScale=$ResolutionScale; aspect=$Aspect; enhancements=[bool]$Enhancements; widescreenOnly=[bool]$WidescreenOnly; interpolationOnly=[bool]$InterpolationOnly; requestedFps=$Fps; captures=[bool]$Capture; paced=[bool]$Paced; desktop=[bool]$Desktop; audio=[bool]$Audio; samples=$rows.Count; binarySha256=(Get-FileHash (Join-Path $root 'DoomSNESRecomp.exe')).Hash; romSha256=(Get-FileHash $Rom).Hash; meanIntervalMs=($intervals | Measure-Object -Average).Average; p95Ms=$sorted[[int](($sorted.Count-1)*0.95)]; p99Ms=$sorted[[int](($sorted.Count-1)*0.99)]; maxMs=($intervals | Measure-Object -Maximum).Maximum }
   foreach ($key in @('guest_ms','raster_ms','compose_ms','present_ms','hook_ms','wait_ms','guest_periods')) { $summary[$key] = ($rows | ForEach-Object { [double]$_.$key } | Measure-Object -Average).Average }
   $summary['runAhead']=$RunAhead
+  $summary['verticalLook']=[bool]$VerticalLook
   $summary['worldCacheDisabled']=[bool]$DisableWorldCache
+  $summary['rendererRequested']=$rendererChoice
+  $summary['vsync']=$VSync
+  $summary['shader']=$Shader
+  $elapsed = [double]$rows[-1].present_seconds - [double]$rows[0].present_seconds
+  $summary['presentationsPerSecond']=($rows.Count-1)/$elapsed
+  $summary['guestFieldsPerSecond']=([int]$rows[-1].frame-[int]$rows[0].frame)/$elapsed
+  foreach ($key in @('audio_underflows','audio_missing_frames','audio_dropped_audible')) {
+    $summary[$key + '_delta']=[long]$rows[-1].$key-[long]$rows[0].$key
+  }
+  $summary['rendererLog']=@(Get-Content (Join-Path $root 'stdout.log') | Where-Object { $_ -match '^(Renderer:|OpenGL:)' } | ForEach-Object { [string]$_ })
+  $effectiveVSync = $summary['rendererLog'] | Select-String -Pattern 'vsync=(-?\d+)'
+  $summary['vsyncEffective'] = if ($effectiveVSync) { [int]$effectiveVSync[0].Matches[0].Groups[1].Value } else { $null }
   $summary | ConvertTo-Json | Set-Content (Join-Path $root 'summary.json')
   $summary | ConvertTo-Json
 } finally {

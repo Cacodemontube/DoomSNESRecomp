@@ -1,0 +1,25 @@
+format_version = 1
+id = "doom.crosshair"
+version = "1.0.0"
+name = "Auto-aim Crosshair"
+author = "DoomSNESRecomp contributors"
+description = "A lime green + that moves onto the predicted native auto-aim enemy and turns red before firing."
+license = "PolyForm-Noncommercial-1.0.0"
+resolver = "declarative"
+save_compatibility = "shared"
+
+[[target]]
+game_id = "doom-y"
+rom_sha256 = "d45e26eb10c323ecd480e5f2326b223e29264c3adde67f48f0d2791128e519e8"
+
+[[feature]]
+id = "autoaim-crosshair"
+name = "Auto-aim lock indicator"
+description = "Green + at the centre; moves to an enemy and turns red when the original targeting rules predict a lock. Read-only preview: the game chooses the actual target when firing."
+group = "Presentation"
+default_enabled = false
+presentation_only = true
+
+[[plugin]]
+feature = "autoaim-crosshair"
+id = "doom.crosshair.autoaim"

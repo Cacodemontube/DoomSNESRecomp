@@ -37,6 +37,7 @@
 #include "doom_renderer.h"
 #include "doom_input.h"
 #include "doom_cheats.h"
+#include "doom_infighting.h"
 #include "doom_music.h"
 #include "doom_ppu_state.h"
 
@@ -49,17 +50,22 @@
 /* The generic SNES blob contains the interpreter CPU, not the native
  * CpuState and beam driver's continuation. Resuming it without these
  * restarts the reset vector over restored gameplay RAM. */
-static const uint32_t doom_state_marker[2] = {0x4d4f4f44u, 0x335845u};
+static const uint32_t doom_state_marker_old[2] = {0x4d4f4f44u, 0x335845u};
+static const uint32_t doom_state_marker[2] = {0x4d4f4f44u, 0x345845u};
 static bool DoomStatePreflight(const void *data, size_t size) {
     return size >= sizeof(doom_state_marker) &&
         !memcmp((const uint8_t *)data + size - sizeof(doom_state_marker),
-                doom_state_marker, sizeof(doom_state_marker));
+                doom_state_marker, sizeof(doom_state_marker)) ||
+        (size >= sizeof(doom_state_marker_old) &&
+         !memcmp((const uint8_t *)data + size - sizeof(doom_state_marker_old),
+                 doom_state_marker_old, sizeof(doom_state_marker_old)));
 }
 static void DoomStateSave(SaveLoadInfo *sli) {
     snes_beam_frame_driver_save_state(sli);
     RtlSaveExecutionState(sli);
     if(!DoomPpuSaveLoadAccess(g_snes->ppu,sli))RtlStateStreamFail(sli);
     DoomRendererSavePauseState(sli);
+    DoomInfightingSave(sli);
     uint32_t marker[2];memcpy(marker,doom_state_marker,sizeof(marker));
     sli->func(sli,marker,sizeof(marker));
 }
@@ -69,8 +75,13 @@ static void DoomStateLoad(SaveLoadInfo *sli, uint32_t version) {
     valid=RtlLoadExecutionState(sli) && valid;
     valid=DoomPpuSaveLoadAccess(g_snes->ppu,sli) && valid;
     valid=DoomRendererLoadPauseState(sli) && valid;
-    uint32_t marker[2]={0};sli->func(sli,marker,sizeof(marker));
-    if(!valid || memcmp(marker,doom_state_marker,sizeof(marker)))RtlStateStreamFail(sli);
+    uint32_t marker[2]={0};
+    bool old=sli->peek && sli->peek(sli,0,marker,sizeof(marker)) &&
+        !memcmp(marker,doom_state_marker_old,sizeof(marker));
+    if(old)DoomInfightingReset();
+    else valid=DoomInfightingLoad(sli) && valid;
+    sli->func(sli,marker,sizeof(marker));
+    if(!valid || memcmp(marker,old?doom_state_marker_old:doom_state_marker,sizeof(marker)))RtlStateStreamFail(sli);
 }
 static void DoomStateLoaded(uint32_t version) {
     (void)version;
@@ -100,6 +111,7 @@ void GameSessionReset(void)
     snes_beam_frame_driver_reset();
     DoomInputReset();
     DoomCheatsReset();
+    DoomInfightingReset();
     DoomMusicReset();
     DoomPresentationReset();
 }

@@ -321,7 +321,7 @@ void DoomInputBeforeFrame(void) {
     static const uint8_t clearance[]={0xa6,0x38,0x21,0x56,0x3f,0x61,0x07,0x08};
     static const uint8_t ceiling_object[]={0xef,0x51,0x3f,0x63,0x07,0xdc};
     static const uint8_t ceiling_player[]={0xa6,0x38,0x21,0x56,0x61,0x07,0xaa};
-    int supported = fx && fx->rom_size == 0x200000 && fx->ram_size >= 0x10000 &&
+    int supported = fx && (fx->rom_size == 0x200000 || fx->rom_size == 0x400000) && fx->ram_size >= 0x10000 &&
         !memcmp(fx->rom + 0x1c1, entry, sizeof(entry)) &&
         !memcmp(fx->rom + 0x23b, angle_load, sizeof(angle_load)) &&
         !memcmp(fx->rom+0x1ac,fall_check,sizeof(fall_check)) &&

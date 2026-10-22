@@ -50,9 +50,59 @@ add_executable(DoomSNESRecomp
     src/doom_cheats.c
     src/doom_music.c
     src/doom_episodes.c
+    src/doom_rotations.cpp
+    src/doom_rotation_mod.c
+    src/doom_crosshair.c
+    src/doom_infighting.c
 )
 
+option(DOOM_DIAGNOSTIC_BUILD "Windows build that automatically writes a performance report ZIP" OFF)
+option(DOOM_SNESED_TEST "Enable the DoomSNESed test launcher and native level patches" OFF)
+if(DOOM_SNESED_TEST)
+    add_library(DoomSNESAudio SHARED src/doom_audio_preview.c
+        snesrecomp/runner/src/snes/apu.c snesrecomp/runner/src/snes/spc.c
+        snesrecomp/runner/src/snes/dsp.c snesrecomp/runner/src/snes/dsp_shadow.c
+        snesrecomp/runner/src/snes/audio_shadow.c)
+    target_include_directories(DoomSNESAudio PRIVATE snesrecomp/runner/src)
+    set_target_properties(DoomSNESAudio PROPERTIES PREFIX "" OUTPUT_NAME "DoomSNESAudio")
+    add_dependencies(DoomSNESRecomp DoomSNESAudio)
+    if(MINGW)
+        target_link_options(DoomSNESAudio PRIVATE -static-libgcc)
+    endif()
+    target_sources(DoomSNESRecomp PRIVATE src/doom_editor.c src/doom_editor_patch.c)
+    set_property(SOURCE src/main.c src/doom_editor.c APPEND PROPERTY
+        COMPILE_DEFINITIONS DOOM_SNESED_TEST=1)
+endif()
+option(DOOM_ASYNC_PRESENTATION "Enable isolated native-view camera worker by default" ON)
+if(DOOM_ASYNC_PRESENTATION)
+    target_compile_definitions(DoomSNESRecomp PRIVATE DOOM_ASYNC_PRESENTATION_DEFAULT=1)
+endif()
+option(DOOM_ENABLE_IPO "Enable cross-file optimization for the Release game executable" OFF)
+if(DOOM_ENABLE_IPO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT _doom_ipo_supported OUTPUT _doom_ipo_error LANGUAGES C CXX)
+    if(NOT _doom_ipo_supported)
+        message(FATAL_ERROR "DOOM_ENABLE_IPO is unsupported by this toolchain: ${_doom_ipo_error}")
+    endif()
+    set_property(TARGET DoomSNESRecomp PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
+if(DOOM_DIAGNOSTIC_BUILD)
+    if(NOT WIN32)
+        message(FATAL_ERROR "DOOM_DIAGNOSTIC_BUILD currently requires Windows")
+    endif()
+    target_sources(DoomSNESRecomp PRIVATE src/doom_diagnostic.c)
+    target_compile_definitions(DoomSNESRecomp PRIVATE DOOM_DIAGNOSTIC_BUILD=1)
+    target_link_libraries(DoomSNESRecomp PRIVATE shell32 advapi32)
+endif()
+
 if(WIN32)
+    option(DOOM_WINDOWS_CONSOLE "Open a Windows console beside the game" OFF)
+    if(NOT DOOM_WINDOWS_CONSOLE)
+        set_target_properties(DoomSNESRecomp PROPERTIES WIN32_EXECUTABLE TRUE)
+        if(MSVC)
+            target_link_options(DoomSNESRecomp PRIVATE /ENTRY:mainCRTStartup)
+        endif()
+    endif()
     enable_language(RC)
     target_sources(DoomSNESRecomp PRIVATE assets/windows/doom.rc)
     set_source_files_properties(assets/windows/doom.rc PROPERTIES
@@ -139,6 +189,10 @@ include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
 recomp_target_launcher_ui(DoomSNESRecomp CONSOLE snes
     BOXART "${CMAKE_SOURCE_DIR}/launcher_assets/img/boxart.tga")
 target_compile_definitions(DoomSNESRecomp PRIVATE DOOM_LAUNCHER=1)
+if(DOOM_SNESED_TEST)
+    set_property(SOURCE "${RECOMP_UI_ROOT}/src/common/backends/imgui/launcher_imgui.cpp"
+        APPEND PROPERTY COMPILE_DEFINITIONS DOOM_SNESED_TEST=1)
+endif()
 add_custom_command(TARGET DoomSNESRecomp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/logo1.png"
@@ -329,6 +383,15 @@ if(BUILD_TESTING)
     target_include_directories(doom_cheats_test PRIVATE src
         ${SNESRECOMP_RUNNER_INCLUDE_DIRS} ${SNESRECOMP_ROOT}/runner/src/desktop)
     snesrecomp_target_sdl(doom_cheats_test)
+    add_executable(doom_infighting_test tests/test_doom_infighting.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
+    target_include_directories(doom_infighting_test PRIVATE src ${SNESRECOMP_RUNNER_INCLUDE_DIRS})
+    if(NOT MSVC)
+        target_link_libraries(doom_infighting_test PRIVATE m)
+    endif()
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+        add_test(NAME doom_infighting COMMAND doom_infighting_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
+    endif()
     if(EXISTS "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
         add_test(NAME doom_cheats COMMAND doom_cheats_test "${CMAKE_SOURCE_DIR}/Doom (USA).sfc")
     endif()
@@ -357,12 +420,24 @@ if(BUILD_TESTING)
         target_link_libraries(host_clock_test PRIVATE m)
     endif()
     add_test(NAME host_clock COMMAND host_clock_test)
-    add_executable(doom_resolution_test tests/test_doom_resolution.c)
+    add_executable(doom_rotations_test tests/doom_rotations_test.cpp src/doom_rotations.cpp)
+    add_executable(doom_crosshair_test tests/test_doom_crosshair.c)
+    target_include_directories(doom_crosshair_test PRIVATE src)
+    add_test(NAME doom_crosshair COMMAND doom_crosshair_test)
+    target_include_directories(doom_rotations_test PRIVATE src)
+    set(DOOM_TEST_WAD "" CACHE FILEPATH "Optional user-owned Doom/Ultimate Doom IWAD for rotation tests")
+    if(DOOM_TEST_WAD)
+        add_test(NAME doom_rotations COMMAND doom_rotations_test "${DOOM_TEST_WAD}" "${CMAKE_BINARY_DIR}/rotation-test/sprites")
+    endif()
+    add_executable(doom_resolution_test tests/test_doom_resolution.c src/doom_rotations.cpp)
     target_include_directories(doom_resolution_test PRIVATE src)
     if(NOT MSVC)
         target_link_libraries(doom_resolution_test PRIVATE m)
     endif()
     add_test(NAME doom_resolution COMMAND doom_resolution_test)
+    if(DOOM_TEST_WAD)
+        add_test(NAME doom_rotation_capture COMMAND doom_resolution_test "${DOOM_TEST_WAD}" "${CMAKE_BINARY_DIR}/rotation-capture-test/sprites")
+    endif()
     add_executable(doom_automap_test tests/test_doom_automap.c)
     target_include_directories(doom_automap_test PRIVATE src)
     if(NOT MSVC)
@@ -382,6 +457,9 @@ if(BUILD_TESTING)
         ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
     target_include_directories(superfx_replay_history_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
     add_test(NAME superfx_replay_history COMMAND superfx_replay_history_test)
+    add_executable(superfx_pixel_flush_test tests/test_superfx_pixel_flush.c)
+    target_include_directories(superfx_pixel_flush_test PRIVATE ${SNESRECOMP_ROOT}/runner/src)
+    add_test(NAME superfx_pixel_flush COMMAND superfx_pixel_flush_test)
     add_executable(doom_video_test tests/test_doom_video.c src/doom_video.c)
     target_include_directories(doom_video_test PRIVATE src)
     if(NOT MSVC)
@@ -401,8 +479,16 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME doom_shading COMMAND doom_shading_test)
 
+    # Manual real-driver check; headless CI need not provide OpenGL 3.3.
+    add_executable(glsl_storage_probe EXCLUDE_FROM_ALL tests/glsl_storage_probe.c
+        ${SNESRECOMP_ROOT}/runner/src/util.c
+        ${SNESRECOMP_ROOT}/third_party/gl_core/gl_core_3_1.c)
+    target_include_directories(glsl_storage_probe PRIVATE ${SNESRECOMP_RUNNER_INCLUDE_DIRS})
+    snesrecomp_target_sdl(glsl_storage_probe)
+    snesrecomp_target_glsl_shader(glsl_storage_probe)
+
     add_executable(doom_presentation_test tests/test_doom_presentation.c
-        src/doom_video.c src/doom_presentation.c)
+        src/doom_video.c src/doom_presentation.c src/doom_rotations.cpp)
     target_include_directories(doom_presentation_test PRIVATE src
         ${SNESRECOMP_RUNNER_INCLUDE_DIRS} ${SNESRECOMP_ROOT}/runner/src/desktop)
     snesrecomp_target_sdl(doom_presentation_test)
@@ -420,7 +506,7 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME doom_ppu_state COMMAND doom_ppu_state_test)
 
-    add_executable(doom_renderer_state_test tests/doom_renderer_state_test.c)
+    add_executable(doom_renderer_state_test tests/doom_renderer_state_test.c src/doom_rotations.cpp)
     target_include_directories(doom_renderer_state_test PRIVATE
         ${SNESRECOMP_ROOT}/runner/src)
     if(NOT MSVC)
@@ -433,6 +519,7 @@ if(BUILD_TESTING)
 
     add_executable(doom_renderer_replay_probe EXCLUDE_FROM_ALL
         tests/doom_renderer_replay_probe.c
+        src/doom_rotations.cpp
         ${SNESRECOMP_ROOT}/runner/src/snes/superfx.c)
     target_include_directories(doom_renderer_replay_probe PRIVATE
         ${SNESRECOMP_ROOT}/runner/src)

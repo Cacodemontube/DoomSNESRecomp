@@ -22,6 +22,7 @@
 #include "doom_automap.h"
 #include "doom_music.h"
 #include "doom_input.h"
+#include "doom_crosshair.h"
 #include "snes/saveload.h"
 
 #include "common_cpu_infra.h"
@@ -38,11 +39,21 @@
 typedef SDL_Semaphore DoomSemaphore;
 #define DoomWaitSemaphore SDL_WaitSemaphore
 #define DoomSignalSemaphore SDL_SignalSemaphore
+#define DoomTryWaitSemaphore SDL_TryWaitSemaphore
 #else
 typedef SDL_sem DoomSemaphore;
 #define DoomWaitSemaphore SDL_SemWait
 #define DoomSignalSemaphore SDL_SemPost
+#define DoomTryWaitSemaphore(p) (SDL_SemTryWait(p) == 0)
 #endif
+#endif
+
+#if defined(DOOM_DIAGNOSTIC_BUILD) && !defined(DOOM_RENDERER_SYNCHRONOUS)
+#define DOOM_PROFILE_RENDERER 1
+static double RendererMilliseconds(void)
+{
+    return (double)SDL_GetPerformanceCounter() * (1000.0 / SDL_GetPerformanceFrequency());
+}
 #endif
 
 enum {
@@ -75,7 +86,16 @@ typedef struct Camera {
     uint16_t angle;
 } Camera;
 
+typedef struct RenderInputs {
+    SuperFx snapshot;
+    const uint8_t *ram, *previous_ram;
+    bool has_previous, interpolation, snapshot_map, metadata;
+    unsigned resolution_scale;
+    bool native_sprites;
+} RenderInputs;
+
 typedef struct RenderJob {
+    RenderInputs inputs;
     Camera camera;
     double fraction;
     int yaw;
@@ -83,10 +103,14 @@ typedef struct RenderJob {
     uint16_t *floors;
     uint8_t *objects;
     uint8_t *messages;
+    uint8_t *message_buffer;
     uint8_t *floor_used;
     DoomResolutionScene *resolution_scene;
     unsigned third;
     uint64_t instructions;
+#ifdef DOOM_PROFILE_RENDERER
+    double profile_total, profile_build, profile_draw, profile_metadata, profile_decode;
+#endif
     bool success;
     char diagnostic[512];
 } RenderJob;
@@ -115,6 +139,7 @@ typedef struct RenderState {
     bool workers_unavailable;
 #endif
     unsigned resolution_scale;
+    bool async_timeline;
     bool look_enabled;
     double horizon_offset, requested_horizon_offset, captured_horizon_offset;
     DoomResolutionScene resolution_scenes[3];
@@ -163,6 +188,7 @@ typedef struct RenderState {
     unsigned configured_width;
     bool widescreen, interpolation, hook_installed, supported;
     bool has_snapshot, has_previous, has_presented, cached, scene_motion;
+    bool cached_resolution_scene;
     unsigned field, captured_field, interval, generation;
     unsigned cached_generation;
     Camera previous, current, cached_camera;
@@ -182,6 +208,20 @@ static struct {
 } loaded_pause;
 static uint64_t texture_cache_epoch;
 static void StopWorkers(void);
+static void StopAsyncRenderer(void);
+static void InvalidateAsyncPicture(void);
+#ifndef DOOM_RENDERER_SYNCHRONOUS
+static bool AsyncRequested(void);
+#endif
+static unsigned ResolutionRasterSplit(unsigned first,unsigned last,unsigned part,
+                                     bool wide,unsigned scale)
+{
+    unsigned quantum=wide && scale==1 ? 2 : 1;
+    unsigned groups=(last-first+quantum-1)/quantum;
+    unsigned offset=groups*part/3*quantum;
+    return first+(offset<last-first ? offset : last-first);
+}
+
 static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,
                                 unsigned first,unsigned last,bool wide);
 
@@ -233,7 +273,7 @@ static bool SupportedRom(const SuperFx *fx)
     static const uint8_t text_plot[] = {
         0xdf,0xde,0x4c,0xdf,0xde,0x4c,0xdf,0xde,0x4c,0xdf,0xde,0x4c,
         0xdf,0xde,0x4c,0xdf,0xde,0x4c,0xdf,0xde,0x4c,0xdf,0xde,0x4c};
-    return fx && fx->rom && fx->ram && fx->rom_size == 0x200000 &&
+    return fx && fx->rom && fx->ram && (fx->rom_size == 0x200000 || fx->rom_size == 0x400000) &&
         fx->ram_size >= 0x10000 &&
         memcmp(fx->rom + kBsp - 0x8000, bsp, sizeof(bsp)) == 0 &&
         memcmp(fx->rom + kBuildC - 0x8000, builds, sizeof(builds)) == 0 &&
@@ -257,7 +297,7 @@ static void Capture(SuperFx *fx, uint32_t pc, void *context)
     (void)pc;
     (void)context;
     bool automap=ReadWord(fx->ram,kAutoMap)!=0;
-    if (!(s.widescreen || s.interpolation || s.resolution_scale > 1 || s.look_enabled || s.transparent_map) || !s.ram ||
+    if (!(s.widescreen || s.interpolation || s.resolution_scale > 1 || s.look_enabled || s.transparent_map || DoomRotationsEnabled()) || !s.ram ||
         (automap && !s.transparent_map))
         return;
 
@@ -283,17 +323,22 @@ static void Capture(SuperFx *fx, uint32_t pc, void *context)
         abs(da) <= 0x4000 &&
         memcmp(s.ram + kLevelIdentity, fx->ram + kLevelIdentity, 4) == 0;
     if (!continuity) {
+        InvalidateAsyncPicture();
         s.weapon_motion = (DoomWeaponMotion){0};
         s.menu_weapon_count=0;s.menu_hud_valid=false;
     }
 
     if (continuity) {
-        /* Native renders can take unequal numbers of fields. Begin the next
-         * interpolation at the last actually presented pose, rather than
-         * jumping to an endpoint that a short native interval never reached. */
-        memcpy(s.previous_ram, s.interpolation && s.has_presented
+        /* Synchronous rendering rebases variable native intervals at the
+         * displayed pose. A worker may still publish an older in-flight job
+         * after this capture: rebasing at its last displayed pose then makes
+         * the next request move backwards. Keep async endpoints on the native
+         * timeline instead, including objects and moving sector heights. */
+        const bool from_presented = s.interpolation && s.has_presented &&
+            !(s.async_timeline && !automap);
+        memcpy(s.previous_ram, from_presented
             ? s.presented_ram : s.ram, fx->ram_size);
-        s.previous = s.interpolation && s.has_presented
+        s.previous = from_presented
             ? s.cached_camera : s.current;
         s.interval = gap;
     }
@@ -419,6 +464,7 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
         /* A previous cartridge can already have been destroyed. Never
          * dereference its pointer here; session reset handles history. */
         StopWorkers();
+        StopAsyncRenderer();
         texture_cache_epoch++;
         free(s.side_ram[0]); free(s.side_ram[1]);
         s.side_ram[0] = s.side_ram[1] = NULL;
@@ -445,12 +491,18 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
     }
     if (s.widescreen != widescreen || s.interpolation != interpolation ||
         s.configured_width != width) {
+        StopAsyncRenderer();
         s.cached = false;
         s.weapon_motion = (DoomWeaponMotion){0};
         s.weapon_tile_count = 0;
     }
     s.widescreen = widescreen;
     s.interpolation = interpolation;
+#ifndef DOOM_RENDERER_SYNCHRONOUS
+    s.async_timeline = AsyncRequested() && !widescreen && interpolation && s.resolution_scale <= 1;
+#else
+    s.async_timeline = false;
+#endif
     s.horizon_offset=interpolation ? s.requested_horizon_offset : s.captured_horizon_offset;
     s.configured_width = width;
     /* Install the line/text observers only while the native map is open;
@@ -458,7 +510,7 @@ void DoomRendererConfigure(SuperFx *fx, bool widescreen, bool interpolation,
     ConfigureMapHooks(fx,s.supported && ReadWord(fx->ram,kAutoMap)!=0 &&
         (interpolation || s.resolution_scale>1 || s.transparent_map));
 
-    if (!s.supported || !(widescreen || interpolation || s.resolution_scale > 1 || s.look_enabled || s.transparent_map)) {
+    if (!s.supported || !(widescreen || interpolation || s.resolution_scale > 1 || s.look_enabled || s.transparent_map || DoomRotationsEnabled())) {
         if (s.hook_installed) {
             superfx_set_pc_hook(fx, kBsp, NULL, NULL);
             s.hook_installed = false;
@@ -524,6 +576,46 @@ static bool NativeMenu(void)
     return !DoomMusicBusy() && s.supported && s.has_snapshot && g_snes && g_snes->ram &&
         (DoomNativeMenuActive() ||
          (ReadWord(g_snes->ram, 0x2d) == 8 && ReadWord(g_snes->ram, 0x2f) == 8));
+}
+
+void DoomRendererDrawCrosshair(uint8_t *dst,size_t pitch,unsigned width,unsigned height) {
+    unsigned scale=height/224;
+    if(!dst || scale<1 || scale>4 || height!=224*scale || width<256*scale ||
+       width>684*scale || width%scale || pitch<width*4 || !WeaponGameplay(s.overlay_ppu) ||
+       NativeMenu() || DoomNativeMenuActive() || DoomMusicBusy() || s.scene_brightness<15)return;
+    const uint8_t *ram=s.fx->ram;
+    DoomAimTarget target=DoomAimSelect(ram,s.fx->ram_size);
+    double cx=(double)width/(2*scale),cy=23+DOOM_RES_HORIZON;
+    uint32_t color=0xff00ff00; // lime green until the native rules select an enemy
+    if(target.object && target.object+16<=s.fx->ram_size) {
+        double depth=target.depth,x=target.x,bottom=target.bottom;
+        if(s.has_presented && s.cached) {
+            double dx=(int16_t)ReadWord(ram,target.object+8)-s.cached_camera.x;
+            double dy=(int16_t)ReadWord(ram,target.object+12)-s.cached_camera.y;
+            double a=s.cached_camera.angle*(2*3.14159265358979323846/65536);
+            x=dx*sin(a)-dy*cos(a);depth=dx*cos(a)+dy*sin(a);
+            bottom=(int16_t)ReadWord(ram,target.object+14)-s.cached_camera.z;
+        }
+        if(depth>DOOM_RES_SCREEN_PLANE) {
+            cx+=x*DOOM_FOCAL/depth;
+            cy+=s.horizon_offset-(bottom+target.height*0.5)*DOOM_RES_VERTICAL_FOCAL/depth;
+            color=0xffff0000;
+        }
+    }
+    int center_x=(int)lround(cx*scale),center_y=(int)lround(cy*scale);
+    int left=(int)(width-256*scale)/2+20*scale,right=left+216*scale;
+    if(s.widescreen) {left=20*scale;right=width-20*scale;}
+    if(center_x<left || center_x>=right || center_y<23*(int)scale || center_y>=167*(int)scale)return;
+    /* A small crisp plus, scaled with render resolution and clipped to the
+     * world viewport. HUD, menus, maps and unsupported scenes get no marker. */
+    for(int y=-3;y<=3;y++)for(int x=-3;x<=3;x++) {
+        if(x && y)continue;
+        for(unsigned sy=0;sy<scale;sy++)for(unsigned sx=0;sx<scale;sx++) {
+            int px=center_x+x*(int)scale+sx,py=center_y+y*(int)scale+sy;
+            if(px>=left && px<right && py>=23*(int)scale && py<167*(int)scale)
+                ((uint32_t *)(dst+(size_t)py*pitch))[px]=color;
+        }
+    }
 }
 
 void DoomRendererSavePauseState(SaveLoadInfo *sli) {
@@ -620,7 +712,7 @@ void DoomRendererDrawMenuPointer(uint8_t *dst,size_t pitch,unsigned width,unsign
 static bool Gameplay(const Ppu *ppu)
 {
     return ppu && s.fx && s.has_snapshot && s.supported &&
-        (s.widescreen || s.interpolation || s.resolution_scale > 1 || s.look_enabled || s.transparent_map) &&
+        (s.widescreen || s.interpolation || s.resolution_scale > 1 || s.look_enabled || s.transparent_map || DoomRotationsEnabled()) &&
         /* Capture runs inside the next native field, before PreparePpu and
          * EndSimFrame publish it. That pending field is fresh, not unsigned
          * history-age underflow. Other future or old snapshots stay invalid. */
@@ -825,6 +917,10 @@ static bool RunPrivateTask(RenderJob *job, SuperFx *source, SuperFx *result,
     source->enhancement_mode = kSuperFxEnhancement_PresentationReplay;
     const uint64_t before = source->instruction_count;
     *result = *source; /* Invalid-input rejection can leave result untouched. */
+#ifdef DOOM_PROFILE_RENDERER
+    const unsigned entry = source->r[15].data;
+    const double replay_start = RendererMilliseconds();
+#endif
     bool completed;
     if (job->yaw || job->floors) {
         const bool draw = source->r[15].data == kDrawA ||
@@ -855,6 +951,13 @@ static bool RunPrivateTask(RenderJob *job, SuperFx *source, SuperFx *result,
         completed = superfx_replay_snapshot_with_history(source, job->ram, result,
                                                          NULL, 0, false);
     }
+#ifdef DOOM_PROFILE_RENDERER
+    const double replay_elapsed = RendererMilliseconds() - replay_start;
+    if (entry == kDrawA || entry == kDrawB || entry == kDrawC ||
+        entry == kMiscA || entry == kMiscB || entry == kMiscC)
+        job->profile_draw += replay_elapsed;
+    else job->profile_build += replay_elapsed;
+#endif
     /* A missing engine callback can jump to the ROM's zero-page STOP. GO
      * clearing alone does not prove that the geometry or picture finished. */
     const bool ok = completed && result->pbr == 0 &&
@@ -878,22 +981,34 @@ static bool RunPrivateTask(RenderJob *job, SuperFx *source, SuperFx *result,
     return ok;
 }
 
+static uint64_t SpreadPlaneBits(uint8_t plane)
+{
+    /* Put each plane bit in its own byte, without a table or shared mutable
+     * initialization. All eight pixels then share one load per bitplane. */
+    uint64_t bits = plane;
+    bits = (bits | (bits << 28)) & UINT64_C(0x0000000f0000000f);
+    bits = (bits | (bits << 14)) & UINT64_C(0x0003000300030003);
+    return (bits | (bits << 7)) & UINT64_C(0x0101010101010101);
+}
+
 static void DecodeThird(const SuperFx *fx, uint8_t *picture, unsigned third)
 {
     /* 8bpp GSU pixels, SCMR height=160: tile columns are 20 tiles apart.
      * Each A/B/C draw reuses native columns 0..71 in this same buffer. */
     const unsigned base = (unsigned)fx->scbr << 10;
     for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
-        for (unsigned x = 0; x < DOOM_VIEW_WIDTH / 3; x++) {
+        for (unsigned x = 0; x < DOOM_VIEW_WIDTH / 3; x += 8) {
             const unsigned tile = (x / 8) * 20 + y / 8;
             const unsigned address = base + tile * 64 + (y & 7) * 2;
-            const unsigned shift = 7 - (x & 7);
-            unsigned color = 0;
+            uint64_t colors = 0;
             for (unsigned plane = 0; plane < 8; plane++)
-                color |= ((fx->ram[(address + (plane / 2) * 16 +
-                                   (plane & 1)) & fx->ram_mask] >> shift) & 1)
-                         << plane;
-            picture[y * DOOM_VIEW_WIDTH + third * 72 + x] = (uint8_t)color;
+                colors |= SpreadPlaneBits(fx->ram[(address + (plane / 2) * 16 +
+                                   (plane & 1)) & fx->ram_mask]) << plane;
+            uint8_t *out = picture + y * DOOM_VIEW_WIDTH + third * 72 + x;
+            /* Explicit byte order works on either host endian, and requires
+             * no alignment from the destination framebuffer. */
+            for (unsigned pixel = 0; pixel < 8; pixel++)
+                out[pixel] = (uint8_t)(colors >> ((7 - pixel) * 8));
         }
     }
 }
@@ -904,19 +1019,19 @@ static int16_t InterpolateCoordinate(int16_t previous, int16_t current,
     return (int16_t)lround(previous + ((int)current - previous) * fraction);
 }
 
-static void InterpolateSectors(uint8_t *work_ram, double fraction)
+static void InterpolateSectors(uint8_t *work_ram, double fraction, const RenderInputs *inputs)
 {
-    if (!s.has_previous || !s.interpolation || fraction >= 1) return;
+    if (!inputs->has_previous || !inputs->interpolation || fraction >= 1) return;
     /* Heights may change independently of the camera (doors and lifts).
      * Use the same presentation time for both endpoints of every opening. */
-    unsigned count = ReadWord(s.ram, kSectorCount);
+    unsigned count = ReadWord(inputs->ram, kSectorCount);
     if (count > kMaxSectors) return;
     for (unsigned sector = 0; sector < count; sector++) {
         const unsigned address = kSectorData + sector * kSectorSize;
         for (unsigned component = 2; component <= 4; component += 2) {
-            const int16_t previous = (int16_t)ReadWord(s.previous_ram,
+            const int16_t previous = (int16_t)ReadWord(inputs->previous_ram,
                                                      address + component);
-            const int16_t current = (int16_t)ReadWord(s.ram,
+            const int16_t current = (int16_t)ReadWord(inputs->ram,
                                                     address + component);
             if (abs((int)current - previous) <= 128)
                 WriteWord(work_ram, address + component,
@@ -926,33 +1041,33 @@ static void InterpolateSectors(uint8_t *work_ram, double fraction)
     }
 }
 
-static void InterpolateObjects(uint8_t *work_ram, double fraction)
+static void InterpolateObjects(uint8_t *work_ram, double fraction, const RenderInputs *inputs)
 {
-    if (!s.has_previous || !s.interpolation || fraction >= 1) return;
+    if (!inputs->has_previous || !inputs->interpolation || fraction >= 1) return;
     /* rloX/Y are 16.16; the renderer reads their signed integer words.
      * Match slot identity and sector membership to avoid interpolating a
      * recycled enemy/projectile or carrying an object across a sector list. */
     /* Slot zero is the invisible single-player camera origin. */
     for (unsigned i = 1; i < kMaxObjects; i++) {
         const unsigned a = kObjects + i * kObjectSize;
-        if (ReadWord(s.ram, a) == 0xffff ||
-            ReadWord(s.previous_ram, a) == 0xffff ||
-            s.ram[a + 4] != s.previous_ram[a + 4] ||
-            s.ram[a + 5] != s.previous_ram[a + 5] ||
-            s.ram[a + 22] != s.previous_ram[a + 22])
+        if (ReadWord(inputs->ram, a) == 0xffff ||
+            ReadWord(inputs->previous_ram, a) == 0xffff ||
+            inputs->ram[a + 4] != inputs->previous_ram[a + 4] ||
+            inputs->ram[a + 5] != inputs->previous_ram[a + 5] ||
+            inputs->ram[a + 22] != inputs->previous_ram[a + 22])
             continue;
         static const unsigned coordinates[] = {8, 12, 14};
         for (unsigned j = 0; j < 3; j++) {
             const unsigned p = a + coordinates[j];
-            const int16_t old = (int16_t)ReadWord(s.previous_ram, p);
-            const int16_t now = (int16_t)ReadWord(s.ram, p);
+            const int16_t old = (int16_t)ReadWord(inputs->previous_ram, p);
+            const int16_t now = (int16_t)ReadWord(inputs->ram, p);
             if (abs((int)old - now) <= 256)
                 WriteWord(work_ram, p,
                           (uint16_t)InterpolateCoordinate(old, now, fraction));
         }
         WriteWord(work_ram, a + 20,
-                  DoomInterpolateAngle(ReadWord(s.previous_ram, a + 20),
-                                       ReadWord(s.ram, a + 20), fraction));
+                  DoomInterpolateAngle(ReadWord(inputs->previous_ram, a + 20),
+                                       ReadWord(inputs->ram, a + 20), fraction));
     }
 }
 
@@ -999,7 +1114,7 @@ static uint64_t SceneKey(double fraction)
     return key;
 }
 
-static void SaveReplayFailure(Camera camera, double fraction, int yaw)
+static void SaveReplayFailure(const RenderJob *job)
 {
     static bool written;
     const char *path = getenv("DOOM_RENDER_FAILURE_DUMP");
@@ -1011,47 +1126,74 @@ static void SaveReplayFailure(Camera camera, double fraction, int yaw)
     const uint32_t size = sizeof(SuperFx);
     fwrite("DOOMRPL1", 1, 8, file);
     fwrite(&size, sizeof(size), 1, file);
-    fwrite(&s.snapshot, sizeof(s.snapshot), 1, file);
-    fwrite(s.ram, 1, s.snapshot.ram_size, file);
-    fwrite(s.has_previous ? s.previous_ram : s.ram,
-           1, s.snapshot.ram_size, file);
-    fwrite(&camera, sizeof(camera), 1, file);
-    fwrite(&fraction, sizeof(fraction), 1, file);
-    fwrite(&yaw, sizeof(yaw), 1, file);
-    fwrite(&s.has_previous, sizeof(s.has_previous), 1, file);
+    fwrite(&job->inputs.snapshot, sizeof(job->inputs.snapshot), 1, file);
+    fwrite(job->inputs.ram, 1, job->inputs.snapshot.ram_size, file);
+    fwrite(job->inputs.has_previous ? job->inputs.previous_ram : job->inputs.ram,
+           1, job->inputs.snapshot.ram_size, file);
+    fwrite(&job->camera, sizeof(job->camera), 1, file);
+    fwrite(&job->fraction, sizeof(job->fraction), 1, file);
+    fwrite(&job->yaw, sizeof(job->yaw), 1, file);
+    fwrite(&job->inputs.has_previous, sizeof(job->inputs.has_previous), 1, file);
     fclose(file);
     written = true;
 }
 
+static bool NeedsResolutionScene(void)
+{
+    /* A level native-resolution view already contains the complete world.
+     * Geometry, UVs and pixel masks are needed only for a host raster pass.
+     * Keep vertical look armed without collecting them until pitch changes. */
+    return s.resolution_scale > 1 || s.widescreen || DoomRotationsEnabled() ||
+        (s.look_enabled && s.horizon_offset != 0);
+}
+
+static RenderInputs CurrentRenderInputs(void)
+{
+    return (RenderInputs){s.snapshot, s.ram, s.previous_ram, s.has_previous,
+        s.interpolation, s.snapshot_map, NeedsResolutionScene(), s.resolution_scale};
+}
+
+static void PrepareRenderJob(RenderJob *job)
+{
+    job->inputs = CurrentRenderInputs();
+    unsigned view = job->picture == s.pictures[0] ? 0 : job->picture == s.pictures[1] ? 1 : 2;
+    if (!job->yaw) job->message_buffer = s.message_pixels;
+    if (job->inputs.metadata) {
+        job->resolution_scene = &s.resolution_scenes[view];
+        job->floors = s.floors[view]; job->floor_used = s.floor_used[view];
+        job->objects = s.object_pixels[view];
+        if (!job->yaw) job->messages = job->message_buffer;
+    }
+}
+
 static void ExecuteRenderJob(RenderJob *job)
 {
+#ifdef DOOM_PROFILE_RENDERER
+    const double job_start = RendererMilliseconds();
+#endif
     const Camera camera = job->camera;
     const double fraction = job->fraction;
     const int yaw = job->yaw;
-    if(!yaw)memset(s.message_pixels,0,sizeof(s.message_pixels));
-    if (s.resolution_scale > 1 || s.look_enabled || s.widescreen) {
-        unsigned view = job->picture == s.pictures[0] ? 0 :
-                        job->picture == s.pictures[1] ? 1 : 2;
-        job->resolution_scene = &s.resolution_scenes[view];
+    /* Inputs and outputs are explicit so workers never read live state. */
+#ifdef DOOM_RENDERER_SYNCHRONOUS
+    if (!job->inputs.ram) PrepareRenderJob(job); /* Standalone replay probes. */
+#endif
+    if(job->message_buffer)memset(job->message_buffer,0,DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT);
+    if (job->resolution_scene) {
         job->resolution_scene->count = 0;
-        job->floors = s.floors[view];
-        job->floor_used = s.floor_used[view];
-        job->objects = s.object_pixels[view];
+        job->resolution_scene->sprite_count = 0;
         memset(job->objects, 0, DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT);
-        if(!job->yaw) {
-            job->messages=s.message_pixels;
-        }
     }
-    SuperFx source = s.snapshot, result;
-    if(s.snapshot_map)RestartPrivateTask(&source,kBsp);
+    SuperFx source = job->inputs.snapshot, result;
+    if(job->inputs.snapshot_map)RestartPrivateTask(&source,kBsp);
     if (job->floors) {
         memset(job->floors, 0, DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT * sizeof(uint16_t));
         memset(job->floor_used, 0, kMaxSectors);
     }
-    memcpy(job->ram, s.ram, source.ram_size);
-    if(s.snapshot_map)WriteWord(job->ram,kAutoMap,0);
-    InterpolateSectors(job->ram, fraction);
-    InterpolateObjects(job->ram, fraction);
+    memcpy(job->ram, job->inputs.ram, source.ram_size);
+    if(job->inputs.snapshot_map)WriteWord(job->ram,kAutoMap,0);
+    InterpolateSectors(job->ram, fraction, &job->inputs);
+    InterpolateObjects(job->ram, fraction, &job->inputs);
     WriteWord(job->ram, kViewX, (uint16_t)camera.x);
     WriteWord(job->ram, kViewY, (uint16_t)camera.y);
     WriteWord(job->ram, kViewZ, (uint16_t)camera.z);
@@ -1067,14 +1209,19 @@ static void ExecuteRenderJob(RenderJob *job)
     WriteWord(job->ram, kViewAngle, (uint16_t)(camera.angle - yaw));
     if (yaw)
         WriteWord(job->ram, kMessageCount, 0); /* Keep messages on main view. */
-    if (!RunPrivateTask(job, &source, &result, 0xc835)) return;
-    if (job->resolution_scene)
+    if (!RunPrivateTask(job, &source, &result, 0xc835)) goto done;
+    if (job->resolution_scene) {
+#ifdef DOOM_PROFILE_RENDERER
+        const double metadata_start = RendererMilliseconds();
+#endif
         DoomResolutionCapture(job->resolution_scene, job->ram, result.ram_size,
                               camera.z, result.rom, result.rom_size);
-    if (job->resolution_scene) {
-        if(s.resolution_scale<=1)
+        if(job->inputs.resolution_scale<=1)
             DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
-        DoomResolutionCaptureSprites(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
+        DoomResolutionCaptureSpritesMode(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size, !job->inputs.native_sprites);
+#ifdef DOOM_PROFILE_RENDERER
+        job->profile_metadata += RendererMilliseconds() - metadata_start;
+#endif
     }
 
     /* High-resolution walls, planes and objects are sampled by the host.
@@ -1083,7 +1230,7 @@ static void ExecuteRenderJob(RenderJob *job)
     static const uint8_t misc_a[]={0x3d,0xa0,0x10,0xe0,0x0b,0x0e,0x01};
     static const uint8_t misc_b[]={0x3d,0xa0,0x10,0xe0,0x0b,0x0e,0x01};
     static const uint8_t misc_c[]={0x3d,0xa0,0x10,0xe0,0x0b,0x19,0xd0};
-    bool host_world=s.resolution_scale>1 && job->resolution_scene &&
+    bool host_world=job->inputs.resolution_scale>1 && job->resolution_scene &&
         !getenv("DOOM_HIGHRES_NATIVE_DRAW") &&
         !memcmp(result.rom+(kMiscA&0x7fff),misc_a,sizeof(misc_a)) &&
         !memcmp(result.rom+(kMiscB&0x7fff),misc_b,sizeof(misc_b)) &&
@@ -1099,21 +1246,38 @@ static void ExecuteRenderJob(RenderJob *job)
          * distinct. Registers/cache stay in source; the RAM seed is the
          * immutable capture while the private working RAM keeps each job's
          * writes for the following job. */
-        source.ram = s.ram;
+        source.ram = (uint8_t *)job->inputs.ram;
         const bool draw=tasks[i]==kDrawA || tasks[i]==kDrawB || tasks[i]==kDrawC;
         unsigned task=host_world && draw ? tasks[i]==kDrawA ? kMiscA : tasks[i]==kDrawB ? kMiscB : kMiscC : tasks[i];
         RestartPrivateTask(&source, task);
-        if (!RunPrivateTask(job, &source, &result, stops[i])) return;
+        if (!RunPrivateTask(job, &source, &result, stops[i])) goto done;
         if (job->resolution_scene && (tasks[i] == kBuildB || tasks[i] == kBuildC)) {
-            if(s.resolution_scale<=1)DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
-            DoomResolutionCaptureSprites(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
+#ifdef DOOM_PROFILE_RENDERER
+            const double metadata_start = RendererMilliseconds();
+#endif
+            if(job->inputs.resolution_scale<=1)DoomResolutionCaptureUv(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size);
+            DoomResolutionCaptureSpritesMode(job->resolution_scene, job->ram, result.ram_size, result.rom, result.rom_size, !job->inputs.native_sprites);
+#ifdef DOOM_PROFILE_RENDERER
+            job->profile_metadata += RendererMilliseconds() - metadata_start;
+#endif
         }
         if (draw) {
+#ifdef DOOM_PROFILE_RENDERER
+            const double decode_start = RendererMilliseconds();
+#endif
             if(!host_world)DecodeThird(&result, job->picture, job->third);
+#ifdef DOOM_PROFILE_RENDERER
+            job->profile_decode += RendererMilliseconds() - decode_start;
+#endif
             job->third++;
         }
     }
     job->success = true;
+done:
+#ifdef DOOM_PROFILE_RENDERER
+    job->profile_total = RendererMilliseconds() - job_start;
+#endif
+    return;
 }
 
 static void MergeRenderJob(const RenderJob *job)
@@ -1121,11 +1285,19 @@ static void MergeRenderJob(const RenderJob *job)
     /* Worker results, metrics and diagnostic files are published only after
      * all private cameras have joined. No worker writes renderer history. */
     s.stats.replay_instructions += job->instructions;
+#ifdef DOOM_PROFILE_RENDERER
+    s.stats.profile_jobs++;
+    s.stats.profile_job_ms += job->profile_total;
+    s.stats.profile_build_ms += job->profile_build;
+    s.stats.profile_draw_ms += job->profile_draw;
+    s.stats.profile_metadata_ms += job->profile_metadata;
+    s.stats.profile_decode_ms += job->profile_decode;
+#endif
     if (job->success) s.stats.camera_passes++;
     else {
         if (getenv("DOOM_RENDER_STATS") && s.stats.failures < 32)
             fputs(job->diagnostic, stderr);
-        SaveReplayFailure(job->camera, job->fraction, job->yaw);
+        SaveReplayFailure(job);
     }
 }
 
@@ -1140,6 +1312,7 @@ static bool RenderCameraInto(Camera camera, double fraction, int yaw,
         job.floors = s.floors[view];
         job.floor_used = s.floor_used[view];
     }
+    PrepareRenderJob(&job);
     ExecuteRenderJob(&job);
     MergeRenderJob(&job);
     return job.success;
@@ -1210,6 +1383,12 @@ static bool RenderViews(Camera camera, double fraction, bool wide)
 {
     s.resolution_cache_valid=false;
     s.geometry_ready=false;
+    if (!NeedsResolutionScene()) {
+        for (unsigned i = 0; i < 3; i++) {
+            s.resolution_scenes[i].count = 0;
+            s.resolution_scenes[i].sprite_count = 0;
+        }
+    }
     if (!wide) {
         s.resolution_scenes[1].count=s.resolution_scenes[2].count=0;
         s.resolution_scenes[1].sprite_count=s.resolution_scenes[2].sprite_count=0;
@@ -1233,11 +1412,13 @@ static bool RenderViews(Camera camera, double fraction, bool wide)
             job->picture = s.pictures[i + 1]; job->ram = s.side_ram[i];
             job->floors = s.floors[i + 1];
             job->floor_used = s.floor_used[i + 1];
+            PrepareRenderJob(job);
             DoomSignalSemaphore(s.workers[i].request);
         }
         RenderJob center = {0};
         center.camera = camera; center.fraction = fraction;
         center.picture = s.pictures[0]; center.ram = s.work_ram;
+        PrepareRenderJob(&center);
         ExecuteRenderJob(&center);
         for (unsigned i = 0; i < 2; i++) DoomWaitSemaphore(s.workers[i].done);
         MergeRenderJob(&center);
@@ -1254,6 +1435,8 @@ static bool RenderViews(Camera camera, double fraction, bool wide)
         RenderCameraInto(camera, fraction, -0x2000, s.pictures[1], s.side_ram[0]) &&
         RenderCameraInto(camera, fraction, 0x2000, s.pictures[2], s.side_ram[1]);
 }
+
+#include "doom_async_renderer.inc"
 
 static bool ColorWindowAt(const Ppu *ppu, unsigned x)
 {
@@ -1369,6 +1552,7 @@ void DoomRendererObserveLine(const Ppu *ppu, unsigned line, void *context)
      * scanout. Side-view backgrounds have the same colour-window treatment
      * as the centre of the native world viewport. The weapon remains an
      * independently resolved native OBJ overlay. */
+    DoomRotationsPalette(ppu->cgram);
     const bool inside = ColorWindowAt(ppu, 128);
     const bool clip = WindowCondition(PPU_clipMode(ppu), inside);
     const bool math = !WindowCondition(PPU_preventMathMode(ppu), inside) &&
@@ -1495,7 +1679,18 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
     camera.angle &= 0xffc0;
     const uint64_t scene_key = SceneKey(fraction);
     const bool wide = s.widescreen && width > 256;
-    if (!(s.cached && s.cached_generation == s.generation &&
+    bool used_async = false;
+#ifndef DOOM_RENDERER_SYNCHRONOUS
+    if (AsyncRequested() && !s.widescreen && s.resolution_scale <= 1 &&
+        s.interpolation && !s.snapshot_map && !NativeMenu()) {
+        bool available;
+        used_async = RenderAsync(camera, fraction, scene_key, &available);
+        if (used_async && !available) { s.has_presented = false; return false; }
+    } else InvalidateAsyncPicture();
+#endif
+    if (!used_async) {
+    if (!(s.cached && s.cached_resolution_scene == NeedsResolutionScene() &&
+          s.cached_generation == s.generation &&
           memcmp(&s.cached_camera, &camera, sizeof(camera)) == 0 &&
           s.cached_scene_key == scene_key)) {
         if (!RenderViews(camera, fraction, wide)) {
@@ -1506,11 +1701,13 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
         s.cached_camera = camera;
         s.cached_scene_key = scene_key;
         s.cached_generation = s.generation;
+        s.cached_resolution_scene = NeedsResolutionScene();
         s.cached = true;
         memcpy(s.presented_ram, s.work_ram, s.snapshot.ram_size);
         if (wide && s.resolution_scale<=1) BuildFloorShading();
     } else {
         s.stats.cache_hits++;
+    }
     }
     s.has_presented = true;
     if(s.snapshot_map && fraction<1)s.stats.automap_world_interpolated_presentations++;
@@ -1545,7 +1742,7 @@ bool DoomRendererDraw(Ppu *ppu, uint8_t *dst, size_t pitch,
             line[x] = s.palettes[y][color];
         }
     }
-    if (wide && s.resolution_scale <= 1)
+    if ((wide || DoomRotationsEnabled()) && s.resolution_scale <= 1)
         DoomRendererDrawResolution(dst, pitch, width, 1);
     if (s.resolution_scale <= 1 && !s.look_enabled)
         DoomRendererDrawWeapon(ppu, dst, pitch, width, height, alpha, true);
@@ -1625,6 +1822,7 @@ bool DoomRendererDrawWeapon(Ppu *ppu, uint8_t *dst, size_t pitch,
 }
 void DoomRendererReset(void)
 {
+    StopAsyncRenderer();
     /* Cartridge replacement can reuse the same SuperFx allocation address.
      * A fresh configuration must validate the ROM and re-register its hook. */
     StopWorkers();
@@ -1741,6 +1939,7 @@ void DoomRendererSetResolution(unsigned scale)
 {
     if (scale < 1 || scale > 4) scale = 1;
     if (s.resolution_scale != scale) {
+        StopAsyncRenderer();
         s.resolution_scale = scale;
         s.cached = false;
         s.has_snapshot = s.has_previous = s.has_presented = false;
@@ -1751,6 +1950,7 @@ void DoomRendererSetResolution(unsigned scale)
 void DoomRendererSetLook(bool enabled, double horizon_offset)
 {
     if (s.look_enabled != enabled) {
+        StopAsyncRenderer();
         s.cached = false;
         s.has_snapshot = s.has_previous = s.has_presented = false;
     }
@@ -1784,6 +1984,25 @@ void DoomRendererDrawMessages(uint8_t *dst,size_t pitch,unsigned width,unsigned 
 static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigned scale,
                                 unsigned first,unsigned last,bool wide)
 {
+    bool exposed_rows[DOOM_VIEW_HEIGHT];
+    const bool *raster_rows = s.visible_rows;
+    if (scale == 1 && !wide && !DoomRotationsEnabled()) {
+        /* The shifted native picture below replaces all interior rows.
+         * Rasterize newly exposed edges and holes left by native text only;
+         * drawing the covered world a second time cannot change the output. */
+        const int shift = (int)lround(s.horizon_offset);
+        for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
+            const int source_y = (int)y - shift;
+            bool exposed = source_y < 0 || source_y >= DOOM_VIEW_HEIGHT;
+            if (!exposed) {
+                const uint8_t *messages = s.message_pixels + source_y * DOOM_VIEW_WIDTH;
+                for (unsigned x = 0; x < DOOM_VIEW_WIDTH && !exposed; x++)
+                    exposed = messages[x] != 0;
+            }
+            exposed_rows[y] = s.visible_rows[y] && exposed;
+        }
+        raster_rows = exposed_rows;
+    }
     /* ROM texture columns are immutable. Keep each raster thread's cache
      * across presentations instead of decoding them again every batch. */
     static _Thread_local DoomResolutionColumn columns_cache[256];
@@ -1797,7 +2016,12 @@ static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigne
     }
     doom_resolution_batch_columns=columns_cache;
     unsigned columns = scale == 1 && wide ? 2 : 1;
+    DoomResolutionDitherColumn dither;
     for (unsigned x = first; x < last; x += columns) {
+        if(columns==2) {
+            memset(dither.valid,0,sizeof(dither.valid));
+            doom_resolution_dither_column=&dither;
+        }
         double rx = (x + columns * 0.5) / scale - width / 2.0;
         unsigned view = 0;
         double yaw = 0;
@@ -1810,12 +2034,12 @@ static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigne
         double ratio = cos(yaw) + rx / DOOM_FOCAL * sin(yaw);
         DoomResolutionScene *scene = &s.resolution_scenes[view];
         double depths[144 * 4];
-        DoomResolutionScene *geometry=scale>1 ? &s.geometry_scene : scene;
+        DoomResolutionScene *geometry=(wide || scale>1 || DoomRotationsEnabled()) ? &s.geometry_scene : scene;
         DoomResolutionRasterColumnRetained(geometry, s.snapshot.rom, s.snapshot.rom_size,
             s.cached_camera.angle, rx, geometry==scene ? (sx - 108) / DOOM_FOCAL : rx/DOOM_FOCAL,
             geometry==scene ? ratio : 1,
-            x, scale, dst, pitch, s.palettes, s.visible_rows, depths,true);
-        if (scale > 1 || (wide && view != 0))
+            x, scale, dst, pitch, s.palettes, raster_rows, depths,true);
+        if (scale > 1 || DoomRotationsEnabled() || (wide && view != 0))
             DoomResolutionSprites(wide ? &s.geometry_scene : scene, s.snapshot.rom, s.snapshot.rom_size,
                 wide ? rx / DOOM_FOCAL : (sx - 108) / DOOM_FOCAL,
                 wide ? 1 : ratio, x, scale, dst, pitch,
@@ -1824,18 +2048,23 @@ static void DrawResolutionRange(uint8_t *dst,size_t pitch,unsigned width,unsigne
             for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
                 if (!s.visible_rows[y]) continue;
                 uint32_t *line = (uint32_t *)(dst + (y + kNativeViewY) * pitch);
-                line[x + 1] = line[x];
+                line[x + 1] = dither.valid[y] ? dither.other[y] : line[x];
             }
     }
     doom_resolution_batch_columns=NULL;
+    doom_resolution_dither_column=NULL;
 }
 
-bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
+static bool DrawResolution(uint8_t *dst, size_t pitch,
                                 unsigned width, unsigned scale)
 {
     if (!dst || scale < 1 || scale > 4 || width < 256 ||
         width > 684 || pitch < width * scale * 4 || !s.cached) return false;
     bool wide = s.widescreen && width > 256;
+    /* Widescreen needs the same merged visibility and recovered edges even
+     * with rotations disabled. A side camera's native occlusion can omit a
+     * wall that still covers rays in the common panoramic projection. */
+    bool complete_world = wide || scale>1 || DoomRotationsEnabled();
     unsigned x0 = wide ? 20 : (width - 256) / 2 + 20;
     unsigned x1 = wide ? width - 20 : x0 + 216;
     /* Interpolation often presents the same quantized camera several times.
@@ -1843,7 +2072,7 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
      * Beam palettes/row visibility and mouse pitch can change between guest
      * captures, so they are part of the cache identity as well. */
     size_t row_bytes=(x1-x0)*scale*4;
-    if(scale>1 && !getenv("DOOM_DISABLE_WORLD_CACHE") && s.resolution_cache_valid &&
+    if(complete_world && !getenv("DOOM_DISABLE_WORLD_CACHE") && s.resolution_cache_valid &&
        s.resolution_cache_width==width && s.resolution_cache_scale==scale &&
        s.resolution_cache_horizon==s.horizon_offset &&
        !memcmp(s.resolution_cache_palettes,s.palettes,sizeof(s.palettes)) &&
@@ -1851,9 +2080,12 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
         for(unsigned y=0;y<DOOM_VIEW_HEIGHT*scale;y++)
             if(s.visible_rows[y/scale])memcpy(dst+(y+kNativeViewY*scale)*pitch+x0*scale*4,
                 s.resolution_cache+y*row_bytes,row_bytes);
-        return true;
+        /* Native central sprites are deliberately absent from the world
+         * cache. Compose them on hits too, otherwise repeated interpolated
+         * presentations alternate between visible sprites and bare world. */
+        goto native_overlay;
     }
-    if(scale>1) {
+    if(complete_world) {
         /* Preserve the original hall-of-mirrors effect in the output's own
          * resolution. Never seed it from the magnified native framebuffer. */
         bool history=s.resolution_cache && s.resolution_cache_capacity>=row_bytes*144*scale &&
@@ -1864,7 +2096,7 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
             else for(unsigned x=0;x<(x1-x0)*scale;x++)row[x]=0xff000000;
         }
     }
-    if(scale>1 && !s.geometry_ready) {
+    if(complete_world && !s.geometry_ready) {
         DoomResolutionMergeViews(&s.geometry_scene,s.resolution_scenes,s.work_ram,
             s.snapshot.rom,s.snapshot.rom_size);
         s.stats.recovered_edges=DoomResolutionRecoverEdges(&s.geometry_scene,s.resolution_scenes,s.work_ram,
@@ -1872,7 +2104,7 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
         DoomResolutionPrepareRays(&s.geometry_scene);
         s.geometry_ready=true;
     }
-    if(scale>1) {
+    if(complete_world) {
         s.geometry_scene.horizon_offset=s.horizon_offset;
         DoomResolutionPreparePlanes(&s.geometry_scene,scale);
     }
@@ -1914,21 +2146,23 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
         }
     }
 #ifndef DOOM_RENDERER_SYNCHRONOUS
-    if(scale>1 && EnsureWorkers()) {
-        unsigned first=x0*scale,last=x1*scale,span=last-first;
+    if(complete_world && EnsureWorkers()) {
+        unsigned first=x0*scale,last=x1*scale;
+        /* Keep low-detail column pairs intact at worker boundaries. */
         for(unsigned i=0;i<2;i++) {
             RenderWorker *worker=&s.workers[i];
             worker->raster=true;worker->dst=dst;worker->pitch=pitch;
             worker->width=width;worker->scale=scale;
-            worker->first=first+span*i/3;worker->last=first+span*(i+1)/3;
+            worker->first=ResolutionRasterSplit(first,last,i,wide,scale);
+            worker->last=ResolutionRasterSplit(first,last,i+1,wide,scale);
             DoomSignalSemaphore(worker->request);
         }
-        DrawResolutionRange(dst,pitch,width,scale,first+span*2/3,last,wide);
+        DrawResolutionRange(dst,pitch,width,scale,ResolutionRasterSplit(first,last,2,wide,scale),last,wide);
         for(unsigned i=0;i<2;i++)DoomWaitSemaphore(s.workers[i].done);
     } else
 #endif
         DrawResolutionRange(dst,pitch,width,scale,x0*scale,x1*scale,wide);
-    if(scale>1) {
+    if(complete_world) {
         size_t bytes=row_bytes*DOOM_VIEW_HEIGHT*scale;
         if(s.resolution_cache_capacity<bytes) {
             uint8_t *cache=realloc(s.resolution_cache,bytes);
@@ -1945,7 +2179,8 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
             s.resolution_cache_horizon=s.horizon_offset;
         }
     }
-    if (scale == 1) {
+native_overlay:
+    if (scale == 1 && !DoomRotationsEnabled()) {
         /* Low-resolution mouse look translates the native Super FX image.
          * Keep its object size, rounding, column duplication and transparent
          * texels instead of reconstructing billboards with continuous math.
@@ -1969,4 +2204,17 @@ bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch,
         }
     }
     return true;
+}
+
+bool DoomRendererDrawResolution(uint8_t *dst, size_t pitch, unsigned width, unsigned scale)
+{
+#ifdef DOOM_PROFILE_RENDERER
+    const double start = RendererMilliseconds();
+#endif
+    const bool result = DrawResolution(dst, pitch, width, scale);
+#ifdef DOOM_PROFILE_RENDERER
+    s.stats.profile_raster_calls++;
+    s.stats.profile_raster_ms += RendererMilliseconds() - start;
+#endif
+    return result;
 }

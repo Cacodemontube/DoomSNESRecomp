@@ -1,6 +1,10 @@
 #include "doom_presentation.h"
 #include "doom_renderer.h"
+#include "doom_rotations.h"
 #include "doom_video.h"
+#ifdef DOOM_DIAGNOSTIC_BUILD
+#include "doom_diagnostic.h"
+#endif
 #include "doom_input.h"
 #include "doom_music.h"
 
@@ -76,6 +80,9 @@ static void ConfigureRenderer(void) {
 
 void DoomPresentationBeforeFrame(void) {
     ReadSettings();
+#ifdef DOOM_DIAGNOSTIC_BUILD
+    DoomDiagnosticVideo(&settings);
+#endif
     ConfigureRenderer();
 }
 
@@ -101,12 +108,16 @@ void DoomPresentationEnd(const uint8_t *field, unsigned number) {
         music_picture_valid=false;
     }
     DoomRendererEndSimFrame(number);
+#ifdef DOOM_DIAGNOSTIC_BUILD
+    DoomDiagnosticSimulationWork();
+#endif
     if (number % 120 == 0 && getenv("DOOM_RENDER_STATS")) {
         DoomRendererStats stats;
         DoomRendererGetStats(&stats);
         fprintf(stderr, "[doom-render] field=%u supported=%d captured=%llu "
                 "passes=%llu cached=%llu failures=%llu interval=%u "
-                "weapon_updates=%llu weapon_interpolated=%llu weapon_offset=%d,%d weapon_tiles=%u weapon_fallbacks=%llu weapon_translucent=%d resolution=%u segments=%u\n",
+                "weapon_updates=%llu weapon_interpolated=%llu weapon_offset=%d,%d weapon_tiles=%u weapon_fallbacks=%llu weapon_translucent=%d resolution=%u segments=%u "
+                "async_accepted=%llu async_stale=%llu async_reused=%llu\n",
                 number, stats.supported, (unsigned long long)stats.captures,
                 (unsigned long long)stats.camera_passes,
                 (unsigned long long)stats.cache_hits,
@@ -115,7 +126,9 @@ void DoomPresentationEnd(const uint8_t *field, unsigned number) {
                 (unsigned long long)stats.weapon_interpolated_presentations,
                 stats.weapon_offset_x, stats.weapon_offset_y,
                 stats.weapon_tiles, (unsigned long long)stats.weapon_layout_fallbacks,
-                stats.weapon_translucent, stats.resolution_scale, stats.resolution_segments);
+                stats.weapon_translucent, stats.resolution_scale, stats.resolution_segments,
+                (unsigned long long)stats.async_accepted,(unsigned long long)stats.async_stale,
+                (unsigned long long)stats.async_reused);
     }
 }
 
@@ -150,7 +163,7 @@ int DoomPresentationDraw(uint8_t *dst, size_t pitch, const uint8_t *field,
     float weight = (float)DoomPresentationAlpha(&settings, alpha);
     DoomRendererRememberHud(field);
     bool tilted = DoomInputLookEnabled() && DoomRendererLookOffset() != 0;
-    bool world = (settings.widescreen || settings.fps_enabled || settings.resolution_enabled || tilted || DoomRendererAutomapOverlay()) &&
+    bool world = (settings.widescreen || settings.fps_enabled || settings.resolution_enabled || DoomRotationsEnabled() || tilted || DoomRendererAutomapOverlay()) &&
         DoomRendererDraw(g_ppu, dst, pitch, (unsigned)width, (unsigned)height, weight);
     if (scale == 1) {
         if (world && tilted && !settings.widescreen) DoomRendererDrawResolution(dst, pitch, width, 1);
@@ -221,7 +234,7 @@ int DoomPresentationKeepDebt(void) {
     /* A native menu is stationary. Discard old render debt so its newly
      * uploaded text reaches the screen immediately on slow machines. */
     if(DoomNativeMenuActive())return 0;
-    return settings.widescreen || settings.fps_enabled || settings.resolution_enabled || transparent_map || DoomInputLookEnabled();
+    return settings.widescreen || settings.fps_enabled || settings.resolution_enabled || transparent_map || DoomRotationsEnabled() || DoomInputLookEnabled();
 }
 
 int DoomPresentationWindowWidth(int width) {

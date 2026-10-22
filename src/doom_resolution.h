@@ -3,6 +3,7 @@
 #include "doom_projection.h"
 #include "doom_shading.h"
 #include "doom_sky.h"
+#include "doom_rotations.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -38,8 +39,11 @@ typedef struct DoomResolutionUv {
 typedef struct DoomResolutionSprite {
     double x, depth, bottom;
     double screen_left;
+    double rotation_anchor;
     uint16_t image, identity;
-    uint8_t width, height, flip, map;
+    uint16_t width, height;
+    uint8_t flip, map;
+    const DoomRotationPatch *rotation;
 } DoomResolutionSprite;
 typedef struct DoomResolutionSegment {
     double x1, z1, x2, z2;
@@ -64,6 +68,13 @@ typedef struct DoomResolutionColumn {
 /* Parallel column batches own their decode cache; geometry and palette
  * inputs remain immutable until every batch has joined. */
 static _Thread_local DoomResolutionColumn *doom_resolution_batch_columns;
+/* A duplicated geometry column still needs the opposite floor colour-map
+ * phase in its second pixel. Walls and sprites invalidate covered entries. */
+typedef struct DoomResolutionDitherColumn {
+    uint32_t other[144*4];
+    bool valid[144*4];
+} DoomResolutionDitherColumn;
+static _Thread_local DoomResolutionDitherColumn *doom_resolution_dither_column;
 typedef struct DoomResolutionScene {
     DoomResolutionSegment segments[DOOM_RES_SEGMENTS];
     unsigned count, sprite_count;
@@ -515,7 +526,15 @@ static inline void DoomResolutionPlane(DoomResolutionScene *scene,
             unsigned row = cached ? scene->plane_light[sector_index][ceiling][y] : DoomResolutionLight(scene, sector, depth, true);
             row += ((dither_x ^ native_y) & 1) ? 0 : 1;
             color = rom[0x1cde00 + (scene->invulnerable ? 32 : row) * 256 + sector[8 + ceiling]];
+            if(doom_resolution_dither_column) {
+                unsigned other=row+(((dither_x^native_y)&1)?1:-1);
+                unsigned alternate=rom[0x1cde00+(scene->invulnerable?32:other)*256+sector[8+ceiling]];
+                doom_resolution_dither_column->other[y]=palettes[native_y][alternate];
+                doom_resolution_dither_column->valid[y]=true;
+            }
         }
+        if(ceiling && (sector[0]&0x80) && doom_resolution_dither_column)
+            doom_resolution_dither_column->valid[y]=false;
         ((uint32_t *)(dst + (size_t)(y + 23 * scale) * pitch))[x] =
             palettes[native_y][color];
         if (depths) depths[y] = plane_depth;
@@ -641,6 +660,7 @@ static inline void DoomResolutionWall(DoomResolutionScene *scene,
         ((uint32_t *)(dst + (size_t)(y + 23 * scale) * pitch))[x] =
             palettes[native_y][color];
         if (depths) depths[y] = depth;
+        if(doom_resolution_dither_column)doom_resolution_dither_column->valid[y]=false;
     }
 }
 static inline int DoomResolutionClipY(double height, double depth,
@@ -735,8 +755,37 @@ static inline void DoomResolutionCaptureUv(DoomResolutionScene *scene,
 }
 /* Capture actual selected object frames, flipping and native colour maps,
  * including glow/invulnerability. No object AI or animation is reconstructed. */
-static inline void DoomResolutionCaptureSprites(DoomResolutionScene *scene,
+static inline void DoomResolutionRotateSprite(DoomResolutionSprite *sprite,
     const uint8_t *ram, size_t size, const uint8_t *rom, size_t rom_size) {
+    unsigned identity=sprite->identity, image=sprite->image;
+    if(DoomRotationsEnabled() && identity && identity+24<=size && !DoomRotationsNativeOverride(ram[identity+23]) && rom_size>=0x200000 &&
+       DoomRotationsObjectFrameAllowed(ram[identity+5],ram[identity+23]) &&
+       image==0x81d0+DoomResolutionWord(rom+0x1a8000+2*ram[identity+23]) &&
+       rom[0x1a0000+image]==sprite->height && rom[0x1a0001+image]==sprite->width) {
+        unsigned image_number=ram[identity+23];
+        unsigned direction=DoomRotationsDirection(
+            DoomResolutionSigned(ram+0x22)-DoomResolutionSigned(ram+identity+8),
+            DoomResolutionSigned(ram+0x24)-DoomResolutionSigned(ram+identity+12),
+            DoomResolutionWord(ram+identity+20));
+        const DoomRotationPatch *patch=DoomRotationsPatch(image_number,direction);
+        const DoomRotationPatch *front=DoomRotationsPatch(image_number,image_number==223?4:0);
+        if(patch && front && sprite->depth>0) {
+            double sx=(double)sprite->width/front->width;
+            double sy=(double)sprite->height/front->height;
+            sprite->screen_left+=(front->left-patch->left)*sx*DOOM_FOCAL/sprite->depth;
+            sprite->bottom+=(patch->top-(int)patch->height-front->top+(int)front->height)*sy;
+            sprite->width=(uint16_t)fmax(1,fmin(256,lround(patch->width*sx)));
+            sprite->height=(uint16_t)fmax(1,fmin(256,lround(patch->height*sy)));
+            sprite->flip=patch->flip;sprite->rotation=patch;
+            sprite->rotation_anchor=(sprite->screen_left-108)*sprite->depth/DOOM_FOCAL-sprite->x;
+        }
+    }
+}
+
+/* A replay worker captures native sprite data only. Asset selection stays on
+ * the main thread so import/clear and palette changes cannot race a job. */
+static inline void DoomResolutionCaptureSpritesMode(DoomResolutionScene *scene,
+    const uint8_t *ram, size_t size, const uint8_t *rom, size_t rom_size, bool rotations) {
     unsigned address = DoomResolutionWord(ram + 0xda);
     for (unsigned visits = 0; address && visits < 28; visits++) {
         if (address + 26 > size) break;
@@ -758,6 +807,11 @@ static inline void DoomResolutionCaptureSprites(DoomResolutionScene *scene,
         sprite->screen_left=DoomResolutionSigned(p+10);
         sprite->height=p[14];sprite->width=p[15];
         sprite->flip=p[21];
+        sprite->rotation=NULL;
+        /* DOOM-FX rle.i: RLObject X/Y are 16.16 at +6/+10,
+         * rloAngle is +20 and rloImage is +23. Use the output camera's
+         * world position, including for objects found by side cameras. */
+        if(rotations)DoomResolutionRotateSprite(sprite,ram,size,rom,rom_size);
         unsigned start=DoomResolutionWord(p+22), end=DoomResolutionWord(p+24);
         if (start + 10 <= end && end <= size) sprite->map=ram[start+7];
         address=DoomResolutionWord(p+2);
@@ -771,6 +825,11 @@ static inline void DoomResolutionCaptureSprites(DoomResolutionScene *scene,
         scene->sprites[j]=sprite;
     }
 }
+static inline void DoomResolutionCaptureSprites(DoomResolutionScene *scene,
+    const uint8_t *ram, size_t size, const uint8_t *rom, size_t rom_size) {
+    DoomResolutionCaptureSpritesMode(scene,ram,size,rom,rom_size,true);
+}
+
 /* Visibility cameras discover objects; they must not each orient a different
  * portion of the same billboard. Project each identity once in the output
  * camera, preferring the native centre image and its original pixel anchor. */
@@ -790,7 +849,7 @@ static inline void DoomResolutionMergeSprites(DoomResolutionScene *dst,
             sprite.depth=source->depth*cos(yaw)-source->x*sin(yaw);
             if(sprite.depth<DOOM_RES_SCREEN_PLANE)continue;
             if(view) sprite.screen_left=108+
-                (sprite.x-sprite.width*0.5)*DOOM_FOCAL/sprite.depth;
+                (sprite.x+(sprite.rotation?sprite.rotation_anchor:-sprite.width*0.5))*DOOM_FOCAL/sprite.depth;
             dst->sprites[dst->sprite_count++]=sprite;
         }
     }
@@ -829,6 +888,16 @@ static inline const uint8_t *DoomResolutionSpriteColumn(DoomResolutionScene *sce
     const uint8_t *rom, size_t size, const DoomResolutionSprite *sprite, unsigned u) {
     if(u>=sprite->width || !sprite->height)return NULL;
     if(sprite->flip)u=sprite->width-1-u;
+    if(sprite->rotation) {
+        static _Thread_local uint8_t pixels[256];
+        const DoomRotationPatch *patch=sprite->rotation;
+        unsigned px=u*patch->width/sprite->width;
+        for(unsigned y=0;y<sprite->height;y++) {
+            unsigned py=patch->height-1-y*patch->height/sprite->height;
+            pixels[y]=(uint8_t)DoomRotationsPixel(patch->pixels[px*patch->height+py]);
+        }
+        return pixels;
+    }
     unsigned table=0x1a0000+sprite->image+2+u*3;
     if(table+3>size)return NULL;
     unsigned address=DoomResolutionRomAddress(rom[table+2],DoomResolutionWord(rom+table));
@@ -877,6 +946,7 @@ static inline void DoomResolutionSprites(DoomResolutionScene *scene,
                 unsigned mapped=rom[0x1c0000+(sprite->map<<8)+column[tv]];
                 ((uint32_t*)(dst+(size_t)(y+23*scale)*pitch))[x]=palettes[ny][mapped];
                 depths[y]=depth;
+                if(doom_resolution_dither_column)doom_resolution_dither_column->valid[y]=false;
             }
             continue;
         }
@@ -905,6 +975,7 @@ static inline void DoomResolutionSprites(DoomResolutionScene *scene,
             if(covered) {
                 *target=0xff000000u|((red/taps)<<16)|((green/taps)<<8)|(blue/taps);
                 depths[y]=depth;
+                if(doom_resolution_dither_column)doom_resolution_dither_column->valid[y]=false;
             }
         }
     }

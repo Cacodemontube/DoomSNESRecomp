@@ -3,6 +3,7 @@
 #include "doom_renderer.h"
 #include "doom_input.h"
 #include "doom_cheats.h"
+#include "doom_infighting.h"
 #include "doom_music.h"
 #include "common_cpu_infra.h"
 #include "snes/snes.h"
@@ -24,6 +25,7 @@ static int requested_key;
 static int requested_pointer,pointer_x,pointer_y,pointer_click;
 static DoomInputStats input_stats;
 static DoomCheatsStats cheat_stats;
+static DoomInfightingStats infighting_stats;
 static char requested_cheat[11];
 static int requested_cheat_keyboard;
 static int requested_level_exit;
@@ -96,10 +98,12 @@ void DoomDebugRecordFrame(unsigned number) {
     DoomInputStats input_snapshot;
     DoomInputGetStats(&input_snapshot);
     DoomCheatsStats cheat_snapshot;DoomCheatsGetStats(&cheat_snapshot);
+    DoomInfightingStats infighting_snapshot;DoomInfightingGetStats(&infighting_snapshot);
     LOCK();
     stats = snapshot;
     input_stats = input_snapshot;
     cheat_stats=cheat_snapshot;
+    infighting_stats=infighting_snapshot;
     music_loading=DoomMusicBusy();
     frame = number;
     invisibility_ticks = ticks;
@@ -142,6 +146,12 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         UNLOCK();
         send(valid && ready?"{\"ok\":true,\"queued\":true}":"{\"ok\":false,\"error\":\"cheat_test requires enabled cheats and gameplay\"}");
         return 1;
+    }
+    if(!strcmp(cmd,"infighting_stats")) {
+        char json[384];LOCK();DoomInfightingStats s=infighting_stats;unsigned f=frame;UNLOCK();
+        snprintf(json,sizeof(json),"{\"ok\":true,\"frame\":%u,\"ready\":%u,\"births\":%u,\"hits\":%u,\"interceptions\":%u,\"retaliations\":%u,\"blocked\":%u,\"splash\":%u}",
+            f,s.ready,s.births,s.hits,s.interceptions,s.retaliations,s.blocked,s.splash);
+        send(json);return 1;
     }
     if(!strcmp(cmd,"cheat_stats")) {
         char json[512];LOCK();DoomCheatsStats s=cheat_stats;unsigned f=frame;UNLOCK();
@@ -217,7 +227,7 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         send("{\"ok\":false,\"error\":\"presentation_stats takes no arguments\"}");
         return 1;
     }
-    char json[1792];
+    char json[2304];
     LOCK();
     snprintf(json, sizeof(json),
         "{\"ok\":true,\"frame\":%u,\"p1_input\":%u,\"p2_input\":%u,\"supported\":%s,\"has_snapshot\":%s,"
@@ -231,6 +241,7 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         "\"automap_active\":%s,\"automap_transparent\":%s,\"automap_lines\":%u,"
         "\"automap_enemy_arrows\":%u,\"automap_projectile_arrows\":%u,\"automap_draws\":%llu,\"automap_interpolated_presentations\":%llu,"
         "\"automap_world_interpolated_presentations\":%llu,"
+        "\"async_submitted\":%llu,\"async_accepted\":%llu,\"async_stale\":%llu,\"async_verified\":%llu,\"async_mismatches\":%llu,"
         "\"look_offset\":%.3f,\"requested_look_offset\":%.3f,\"draw_calls\":%llu,\"draw_total_ms\":%.6f,\"draw_max_ms\":%.6f}",
         frame, p1, p2, stats.supported ? "true" : "false", stats.has_snapshot ? "true" : "false",
         (unsigned long long)stats.captures, (unsigned long long)stats.camera_passes,
@@ -246,6 +257,8 @@ static int Command(const char *cmd, const char *args, DebugServerGameSendLine se
         stats.automap_active ? "true" : "false",stats.automap_transparent ? "true" : "false",stats.automap_lines,
         stats.automap_enemy_arrows,stats.automap_projectile_arrows,(unsigned long long)stats.automap_draws,(unsigned long long)stats.automap_interpolated_presentations,
         (unsigned long long)stats.automap_world_interpolated_presentations,
+        (unsigned long long)stats.async_submitted,(unsigned long long)stats.async_accepted,
+        (unsigned long long)stats.async_stale,(unsigned long long)stats.async_verified,(unsigned long long)stats.async_mismatches,
         stats.look_offset,stats.requested_look_offset,draws, draw_total_ms, draw_max_ms);
     UNLOCK();
     send(json);

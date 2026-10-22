@@ -3,6 +3,7 @@
  * timing and raster policy without advancing any native game execution. */
 #define DOOM_RENDERER_SYNCHRONOUS 1
 #include "../src/doom_renderer.c"
+#include "fixtures/doom_resolution_draw_reference.inc"
 static bool music_busy;
 int DoomMusicBusy(void) { return music_busy; }
 int DoomNativeMenuActive(void) { return 0; }
@@ -10,6 +11,7 @@ static bool test_pointer;
 int DoomInputMenuPointer(double *x,double *y) { if(x)*x=100;if(y)*y=70;return test_pointer; }
 
 #include <stdio.h>
+#include <time.h>
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -125,10 +127,84 @@ static void SetBrightness(Ppu *ppu, unsigned brightness)
         ppu->brightnessMult[i] = ((i << 3) | (i >> 2)) * brightness / 15;
 }
 
+static void DecodeThirdScalar(const SuperFx *fx, uint8_t *picture, unsigned third)
+{
+    for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++)
+        for (unsigned x = 0; x < 72; x++) {
+            unsigned address = ((unsigned)fx->scbr << 10) +
+                ((x / 8) * 20 + y / 8) * 64 + (y & 7) * 2;
+            unsigned color = 0;
+            for (unsigned plane = 0; plane < 8; plane++)
+                color |= ((fx->ram[(address + (plane / 2) * 16 +
+                    (plane & 1)) & fx->ram_mask] >> (7 - (x & 7))) & 1) << plane;
+            picture[y * DOOM_VIEW_WIDTH + third * 72 + x] = (uint8_t)color;
+        }
+}
+
+static void CheckPlanarDecode(bool benchmark)
+{
+    SuperFx fx = {0};
+    fx.ram_size = 65536;
+    fx.ram_mask = fx.ram_size - 1;
+    fx.ram = malloc(fx.ram_size);
+    uint8_t actual[DOOM_VIEW_WIDTH * DOOM_VIEW_HEIGHT];
+    uint8_t expected[sizeof(actual)];
+    CHECK(fx.ram);
+    for (unsigned value = 0; value < 256; value++) {
+        uint64_t expanded = SpreadPlaneBits((uint8_t)value);
+        for (unsigned bit = 0; bit < 8; bit++)
+            CHECK(((expanded >> (bit * 8)) & 255) == ((value >> bit) & 1));
+    }
+    uint32_t random = 0x12345678;
+    for (unsigned i = 0; i < fx.ram_size; i++) {
+        random = random * 1664525u + 1013904223u;
+        fx.ram[i] = (uint8_t)(random >> 24);
+    }
+    /* Include buffer bases that wrap RAM, every strip, and guard bytes in
+     * neighbouring strips. The oracle decodes individual hardware bits. */
+    for (unsigned base = 0; base < 256; base += 17) {
+        fx.scbr = (uint8_t)base;
+        for (unsigned third = 0; third < 3; third++) {
+            memset(actual, 0xa5, sizeof(actual));
+            memset(expected, 0xa5, sizeof(expected));
+            DecodeThirdScalar(&fx, expected, third);
+            DecodeThird(&fx, actual, third);
+            CHECK(memcmp(actual, expected, sizeof(actual)) == 0);
+        }
+    }
+    if (benchmark) {
+        /* Indirect volatile calls keep both complete decodes in the timed
+         * workload even with LTO. Alternate order; verify outside timing. */
+        for (unsigned pair = 0; pair < 6; pair++) {
+            double ms[2];
+            for (unsigned order = 0; order < 2; order++) {
+                unsigned variant = order ^ (pair & 1);
+                void (*volatile decode)(const SuperFx *, uint8_t *, unsigned) =
+                    variant ? DecodeThird : DecodeThirdScalar;
+                clock_t start = clock();
+                for (unsigned frame = 0; frame < 2000; frame++)
+                    for (unsigned third = 0; third < 3; third++)
+                        decode(&fx, actual, third);
+                ms[variant] = 1000.0 * (clock() - start) / CLOCKS_PER_SEC;
+                for (unsigned third = 0; third < 3; third++)
+                    DecodeThirdScalar(&fx, expected, third);
+                CHECK(memcmp(actual, expected, sizeof(actual)) == 0);
+            }
+            printf("decode pair %u: scalar=%.3f ms packed=%.3f ms (2000 frames)\n",
+                   pair + 1, ms[0], ms[1]);
+        }
+    }
+    free(fx.ram);
+}
+
 int main(int argc, char **argv)
 {
-    if(argc!=2) {
-        fprintf(stderr,"Usage: %s <Doom ROM path>\n",argv[0]);
+    bool benchmark = argc == 2 && !strcmp(argv[1], "--benchmark-decode");
+    CheckPlanarDecode(benchmark);
+    if (benchmark) return 0;
+    bool benchmark_look = argc == 3 && !strcmp(argv[2], "--benchmark-look");
+    if(argc!=2 && !benchmark_look) {
+        fprintf(stderr,"Usage: %s <Doom ROM path> [--benchmark-look]\n",argv[0]);
         return 2;
     }
     SuperFx fx = {0};
@@ -169,7 +245,8 @@ int main(int argc, char **argv)
     CHECK(s.interval == 3 && s.previous.x == 40);
     CHECK(ReadWord(s.previous_ram, kSectorData + 2) == 8);
     memcpy(s.work_ram, s.ram, fx.ram_size);
-    InterpolateSectors(s.work_ram, 0);
+    RenderInputs interpolation_inputs = CurrentRenderInputs();
+    InterpolateSectors(s.work_ram, 0, &interpolation_inputs);
     CHECK(ReadWord(s.work_ram, kSectorData + 2) == 8);
     CHECK(InterpolateCoordinate(s.previous.x, s.current.x, 0) == 40);
     CHECK(DoomInterpolateAngle(s.previous.angle, s.current.angle, 0) == 0xff80);
@@ -301,8 +378,21 @@ int main(int argc, char **argv)
     s.cached_camera = s.current;
     s.cached_camera.angle &= 0xffc0;
     s.cached_scene_key = SceneKey(1);
+    s.cached_resolution_scene = NeedsResolutionScene();
     CHECK(DoomRendererDraw(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0));
     CHECK(s.has_presented && replay_attempts == 1 && s.stats.cache_hits == 1);
+
+    /* Arming look at zero pitch needs no geometry. Moving the horizon with
+     * the same camera and scene must rebuild the cache with raster metadata. */
+    s.widescreen = false; s.look_enabled = true; s.horizon_offset = 0;
+    s.cached_resolution_scene = false;
+    CHECK(DoomRendererDraw(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0));
+    CHECK(replay_attempts == 1);
+    s.horizon_offset = 0.25;
+    CHECK(!DoomRendererDraw(ppu, (uint8_t *)output, 342 * 4, 342, 224, 0));
+    CHECK(replay_attempts == 2);
+    s.widescreen = true; s.look_enabled = false; s.horizon_offset = 0;
+    s.cached = s.cached_resolution_scene = s.has_presented = true;
 
     /* Translate the resolved weapon colour and its mask together, leaving
      * the original location covered by the newly rendered world. */
@@ -386,7 +476,8 @@ int main(int argc, char **argv)
     }
     /* A close, flat wall spans both former viewport borders. Its floor edge
      * must land on the same row using all three native visibility cameras.
-     * Side pixels have the same paired-column density as the centre. */
+     * Side geometry retains paired-column density; floor colours alternate
+     * inside each pair just as the original ROM's floor plotter does. */
     s.widescreen = true;s.horizon_offset = 0;s.map_width = 0;
     memset(s.object_pixels, 0, sizeof(s.object_pixels));
     for (unsigned view = 0; view < 3; view++) {
@@ -402,22 +493,68 @@ int main(int argc, char **argv)
             .floor_height=0,.ceiling_height=64};
     }
     for (unsigned i = 0; i < 342*224; i++) output[i] = 0xffabcdef;
-    /* Exclude wall-image tables so the native wall band retains its pixels;
+    /* Exclude wall-image tables so the wall band remains explicit void;
      * the real colormap allocation remains available for plane rendering. */
     size_t saved_rom_size = s.snapshot.rom_size;
     s.snapshot.rom_size = 0x1b0000;
+    /* The central camera retained this wall, but native occlusion omitted
+     * it from the left visibility camera. Widescreen must still draw its
+     * floor continuously across the former camera boundary. */
+    s.resolution_scenes[1].count=0;
+    s.geometry_ready=false;s.resolution_cache_valid=false;
     s.object_pixels[0][100 * DOOM_VIEW_WIDTH + 108] = 1;
     CHECK(DoomRendererDrawResolution((uint8_t *)output,342 * 4,342,1));
     for (unsigned x = 20; x < 322; x++) {
         CHECK(output[(104 + kNativeViewY) * 342 + x] != 0xffabcdef);
-        CHECK(output[(102 + kNativeViewY) * 342 + x] == 0xffabcdef);
+        CHECK(output[(102 + kNativeViewY) * 342 + x] == 0xff000000);
     }
-    for (unsigned x = 20; x < 322; x += 2)
-        CHECK(output[(120 + kNativeViewY) * 342 + x] ==
-              output[(120 + kNativeViewY) * 342 + x + 1]);
+    unsigned row=DoomResolutionLight(&s.resolution_scenes[0],s.resolution_scenes[0].sectors,
+        32*128.0/(120.5-71.5),true);
+    for (unsigned x = 20; x < 62; x += 2) {
+        CHECK(output[(120+kNativeViewY)*342+x]==s.palettes[120][s.snapshot.rom[kColorMapsRom+(row+1)*256+200]]);
+        CHECK(output[(120+kNativeViewY)*342+x+1]==s.palettes[120][s.snapshot.rom[kColorMapsRom+row*256+200]]);
+    }
     CHECK(output[(100 + kNativeViewY) * 342 + 171] ==
           (0xff000000u | s.pictures[0][100 * DOOM_VIEW_WIDTH + 108]));
+    /* Cached world pixels exclude the native central sprite overlay. It
+     * must be composed on every presentation, not only on a cache miss. */
+    CHECK(s.resolution_cache_valid);
+    unsigned sprite_offset=100*DOOM_VIEW_WIDTH+108;
+    uint8_t original_sprite=s.pictures[0][sprite_offset];
+    uint32_t cached_world=((uint32_t *)s.resolution_cache)[100*302+151];
+    for(unsigned repeat=0;repeat<6;repeat++) {
+        s.pictures[0][sprite_offset]=(uint8_t)(100+repeat);
+        output[(100+kNativeViewY)*342+171]=0xffabcdef;
+        CHECK(DoomRendererDrawResolution((uint8_t *)output,342*4,342,1));
+        CHECK(output[(100+kNativeViewY)*342+171]==
+              (0xff000000u|s.pictures[0][100*DOOM_VIEW_WIDTH+108]));
+        CHECK(s.resolution_cache_valid);
+        CHECK(((uint32_t *)s.resolution_cache)[100*302+151]==cached_world);
+    }
+    s.object_pixels[0][sprite_offset]=0;
+    CHECK(DoomRendererDrawResolution((uint8_t *)output,342*4,342,1));
+    CHECK(output[(100+kNativeViewY)*342+171]==cached_world);
+    s.object_pixels[0][sprite_offset]=1;s.pictures[0][sprite_offset]=original_sprite;
     s.snapshot.rom_size = saved_rom_size;
+    /* Parallel raster ranges must preserve two-pixel floor dither and ray
+     * sampling at both joins, including widths with an odd third. */
+    for(unsigned width=257;width<=684;width++) {
+        unsigned previous=20;
+        for(unsigned part=1;part<=3;part++) {
+            unsigned boundary=ResolutionRasterSplit(20,width-20,part,true,1);
+            CHECK(boundary>=previous && boundary<=width-20);
+            if(part<3)CHECK((boundary-20)%2==0);
+            previous=boundary;
+        }
+        CHECK(previous==width-20);
+    }
+    uint32_t *split_image=malloc(342*224*4);CHECK(split_image);
+    memset(output,0,342*224*4);memset(split_image,0,342*224*4);
+    DrawResolutionRange((uint8_t *)output,342*4,342,1,20,322,true);
+    for(unsigned part=0;part<3;part++)
+        DrawResolutionRange((uint8_t *)split_image,342*4,342,1,
+            ResolutionRasterSplit(20,322,part,true,1),ResolutionRasterSplit(20,322,part+1,true,1),true);
+    CHECK(!memcmp(output,split_image,342*224*4));free(split_image);
     /* Text pixels are native, opaque and centred, but never follow mouse
      * pitch or weapon motion. Scale their screen coordinates uniformly. */
     memset(s.message_pixels,0,sizeof(s.message_pixels));
@@ -435,6 +572,47 @@ int main(int argc, char **argv)
         CHECK(output[(kNativeViewY+2)*342+63+77]==0xff123456);
         CHECK(output[(kNativeViewY+3)*342+63+77]==0);
     }
+    /* Compare the complete final image against the former full raster,
+     * including fractional pitch, text holes, hidden rows and void rays. */
+    uint32_t *full_raster = malloc(342 * 224 * 4); CHECK(full_raster);
+    const double pitches[] = {-42,-20.75,-0.25,0,0.25,20.75,42};
+    s.widescreen = false; s.map_width = 0;
+    for (unsigned empty = 0; empty < 2; empty++)
+    for (unsigned hidden = 0; hidden < 2; hidden++)
+    for (unsigned text = 0; text < 2; text++)
+    for (unsigned p = 0; p < sizeof(pitches)/sizeof(*pitches); p++) {
+        s.resolution_scenes[0].count = empty ? 0 : 1;
+        s.horizon_offset = pitches[p];
+        for (unsigned y = 0; y < DOOM_VIEW_HEIGHT; y++) {
+            s.visible_rows[y] = !hidden || y % 3;
+            for (unsigned x = 0; x < DOOM_VIEW_WIDTH; x++)
+                s.message_pixels[y * DOOM_VIEW_WIDTH + x] = text && y % 17 == 0 && x % 7 == 0 ? 110 : 0;
+        }
+        for (unsigned i = 0; i < 342 * 224; i++) output[i] = full_raster[i] = 0xff123456u + i;
+        CHECK(DoomRendererDrawResolutionReference((uint8_t *)full_raster,342 * 4,342,1));
+        CHECK(DoomRendererDrawResolution((uint8_t *)output,342 * 4,342,1));
+        CHECK(!memcmp(output,full_raster,342 * 224 * 4));
+    }
+    if (benchmark_look) {
+        s.resolution_scenes[0].count = 1; s.horizon_offset = 20.75;
+        memset(s.message_pixels,0,sizeof(s.message_pixels));
+        memset(s.visible_rows,1,sizeof(s.visible_rows));
+        for (unsigned pair = 0; pair < 4; pair++) {
+            double milliseconds[2];
+            for (unsigned order = 0; order < 2; order++) {
+                unsigned variant = order ^ (pair & 1);
+                clock_t start = clock();
+                for (unsigned run = 0; run < 1000; run++) {
+                    if (variant) DoomRendererDrawResolution((uint8_t *)output,342 * 4,342,1);
+                    else DoomRendererDrawResolutionReference((uint8_t *)full_raster,342 * 4,342,1);
+                }
+                milliseconds[variant] = 1000.0 * (clock() - start) / CLOCKS_PER_SEC;
+            }
+            printf("Look raster pair %u, 1000 pictures: full=%.3f ms exposed=%.3f ms\n",
+                pair+1,milliseconds[0],milliseconds[1]);
+        }
+    }
+    free(full_raster);
     free(ppu->renderBuffer);
     ppu->renderBuffer = NULL;
 
@@ -612,6 +790,61 @@ int main(int argc, char **argv)
     DoomRendererConfigure(&fx,false,false,256);CHECK(DoomRendererLookOffset()==0);
     Capture(&fx,kBsp,NULL);CHECK(DoomRendererLookOffset()==-20);
     DoomRendererSetLook(false,20);CHECK(DoomRendererLookOffset()==0);
+    /* Delayed worker publication must not rebase the next native interval
+     * behind an in-flight camera. Exercise both turn directions and wrap. */
+    for (unsigned fast = 0; fast <= 1; fast++)
+    for (int direction = -1; direction <= 1; direction += 2) {
+        DoomRendererReset();
+        DoomRendererSetResolution(1);
+        DoomRendererConfigure(&fx, false, true, 256);
+        SetCamera(&fx, 0, 0xff00, 0);
+        Capture(&fx, kBsp, NULL);
+        s.async_timeline = true; /* Standalone fixture has no SDL worker. */
+        for (unsigned step = 1; step <= 12; step++) {
+            const Camera endpoint = s.current;
+            WriteWord(s.ram, kSectorData + 2, step * 10);
+            memcpy(s.presented_ram, s.ram, fx.ram_size);
+            WriteWord(s.presented_ram, kSectorData + 2, 1);
+            s.has_presented = true;
+            s.cached_camera = endpoint;
+            s.cached_camera.x -= direction * (fast ? 40 : 1);
+            s.cached_camera.angle -= direction * 128;
+            s.field += 2 + step % 5;
+            SetCamera(&fx, direction * (int)step * (fast ? 100 : 2),
+                      (uint16_t)(0xff00 + direction * (int)step * (fast ? 256 : 64)), 0);
+            Capture(&fx, kBsp, NULL);
+            CHECK(s.has_previous);
+            CHECK(s.previous.x == endpoint.x && s.previous.angle == endpoint.angle);
+            CHECK(ReadWord(s.previous_ram, kSectorData + 2) == step * 10);
+            const int late_worker_x = endpoint.x - direction * (fast ? 20 : 1);
+            CHECK(direction * (InterpolateCoordinate(s.previous.x, s.current.x, 0) - late_worker_x) >= 0);
+            CHECK(direction * (int16_t)(DoomInterpolateAngle(s.previous.angle, s.current.angle, 0) -
+                                       (uint16_t)(endpoint.angle - direction * 64)) >= 0);
+        }
+    }
+    /* The crosshair uses no camera replay and never edits authentic RAM. */
+    Snes *old_machine=g_snes;g_snes=NULL;
+    s.fx=&fx;s.supported=true;s.overlay_ppu=ppu;s.scene_brightness=15;
+    s.has_presented=false;s.horizon_offset=0;s.widescreen=false;
+    WriteWord(fx.ram,kAutoMap,0);WriteWord(fx.ram,0xda,0);
+    memset(output,0,342*224*4);
+    DoomRendererDrawCrosshair((uint8_t*)output,342*4,342,224);
+    CHECK(output[95*342+171]==0xff00ff00);
+    WriteWord(fx.ram,0xda,0x1000);memset(fx.ram+0x1000,0,26);
+    WriteWord(fx.ram,0x1000,128);WriteWord(fx.ram,0x1004,0x2000);
+    WriteWord(fx.ram,0x1006,10);WriteWord(fx.ram,0x1008,(unsigned)-20);
+    WriteWord(fx.ram,0x100a,100);WriteWord(fx.ram,0x100c,58);
+    fx.ram[0x100e]=56;fx.ram[0x1014]=1;fx.ram[0x2004]=0xe0;fx.ram[0x2005]=6;
+    WriteWord(fx.ram,0x1dc,2);
+    uint8_t native_objects[26];memcpy(native_objects,fx.ram+0x1000,26);
+    memset(output,0,342*224*4);uint64_t replays=s.stats.camera_passes;
+    DoomRendererDrawCrosshair((uint8_t*)output,342*4,342,224);
+    CHECK(output[87*342+(unsigned)lround(171+10*DOOM_FOCAL/128)]==0xffff0000);
+    CHECK(!memcmp(native_objects,fx.ram+0x1000,26) && replays==s.stats.camera_passes);
+    WriteWord(fx.ram,kAutoMap,1);memset(output,0,342*224*4);
+    DoomRendererDrawCrosshair((uint8_t*)output,342*4,342,224);
+    for(unsigned i=0;i<342*224;i++)CHECK(output[i]==0);
+    g_snes=old_machine;
     DoomRendererConfigure(NULL, false, false, 256);
     free(output); free(ppu); free(fx.ram); free(fx.rom);
     puts("Doom renderer state tests passed");

@@ -27,7 +27,7 @@ SNES_MOD_CONSTRUCTOR(RegisterDoomEpisodes) {
 }
 static uint8_t *CurrentRom(void) {
     Cart *cart=g_snes?g_snes->cart:NULL;
-    return cart && cart->rom && cart->romSize==0x200000?cart->rom:NULL;
+    return cart && cart->rom && (cart->romSize==0x200000 || cart->romSize==0x400000)?cart->rom:NULL;
 }
 static void Restore(uint8_t *rom) {
     rom[MenuInit+1]=menu_original[1];

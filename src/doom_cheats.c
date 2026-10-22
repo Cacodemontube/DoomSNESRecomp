@@ -227,7 +227,7 @@ void DoomCheatsBeforeFrame(void) {
         if(core && god)SelectFace(core,0);
         Remove();DoomCheatsReset();return;
     }
-    if(core || !fx || fx->rom_size!=0x200000 || fx->ram_size<0x10000)return;
+    if(core || !fx || (fx->rom_size!=0x200000 && fx->rom_size!=0x400000) || fx->ram_size<0x10000)return;
     for(unsigned i=0;i<sizeof(hooks)/sizeof(*hooks);i++)
         if(memcmp(fx->rom+(hooks[i].pc&0x7fff),hooks[i].bytes,hooks[i].size))return;
     core=fx;

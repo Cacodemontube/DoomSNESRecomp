@@ -2,7 +2,123 @@
 #include <stdio.h>
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 static void word(uint8_t *p, unsigned n) { p[0] = n; p[1] = n >> 8; }
-int main(void) {
+static void CheckImportedRotations(const char *wad,const char *directory,const char *rom_path) {
+    char error[512];
+    CHECK(DoomRotationsImport(wad,directory,error,sizeof(error)) || (fprintf(stderr,"%s\n",error),0));
+    uint8_t *ram=calloc(1,65536),*rom=calloc(1,0x200000);
+    DoomResolutionScene *scene=calloc(1,sizeof(*scene));
+    CHECK(ram && rom && scene);
+    if(rom_path) {
+        FILE *file=fopen(rom_path,"rb");CHECK(file);
+        CHECK(fread(rom,1,0x200000,file)==0x200000);fclose(file);
+        const uint8_t lookup[]={0xa0,0x5a,0x3f,0xdf,0xf0,0x00,0x80,0x1e,0x51,0xf1,0xd0,0x81};
+        CHECK(!memcmp(rom+0x46ce,lookup,sizeof(lookup)));
+        const uint8_t spider_walk[]={8,120,8,121,8,120,8,122};
+        CHECK(!memcmp(rom+0x1fdf36,spider_walk,sizeof(spider_walk)));
+        // Independent ROM evidence: the later frame uses the same image
+        // strips in reverse order. The Spiderdemon PC counterpart uses a
+        // shared mirrored lump; Pinky/Baron use separately stored PC art.
+        const unsigned pairs[][2]={{66,68},{95,97},{121,122}};
+        for(unsigned pair=0;pair<3;pair++) {
+            unsigned a=0x1a81d0+DoomResolutionWord(rom+0x1a8000+pairs[pair][0]*2);
+            unsigned b=0x1a81d0+DoomResolutionWord(rom+0x1a8000+pairs[pair][1]*2);
+            CHECK(rom[a]==rom[b] && rom[a+1]==rom[b+1]);
+            unsigned width=rom[a+1];
+            for(unsigned x=0;x<width;x++)CHECK(!memcmp(rom+a+2+x*3,rom+b+2+(width-1-x)*3,3));
+            for(unsigned direction=0;direction<=4;direction+=4) {
+                const DoomRotationPatch *p=DoomRotationsPatch(pairs[pair][0],direction);
+                const DoomRotationPatch *q=DoomRotationsPatch(pairs[pair][1],direction);
+                CHECK(p && q);
+                if(pair==2) {
+                    CHECK(p->width==q->width && p->height==q->height && p->flip!=q->flip);
+                    CHECK(!memcmp(p->pixels,q->pixels,p->width*p->height*sizeof(*p->pixels)));
+                }
+            }
+        }
+        unsigned mirrors=0;
+        for(unsigned type=6;type<=14;type++)for(unsigned i=0;i<232;i++) {
+            if(!DoomRotationsObjectFrameAllowed(type,i))continue;
+            for(unsigned j=i+1;j<232;j++) {
+                if(!DoomRotationsObjectFrameAllowed(type,j))continue;
+                unsigned a=0x1a81d0+DoomResolutionWord(rom+0x1a8000+i*2);
+                unsigned b=0x1a81d0+DoomResolutionWord(rom+0x1a8000+j*2);
+                if(rom[a]!=rom[b] || rom[a+1]!=rom[b+1])continue;
+                bool mirrored=true;
+                for(unsigned x=0;x<rom[a+1];x++)
+                    if(memcmp(rom+a+2+x*3,rom+b+2+(rom[a+1]-1-x)*3,3))mirrored=false;
+                if(mirrored) {
+                    CHECK((i==66 && j==68) || (i==95 && j==97) || (i==121 && j==122));
+                    mirrors++;
+                }
+            }
+        }
+        CHECK(mirrors==3);
+        puts("Retail ROM audit: all nine enemy families checked; Pinky, Baron and Spiderdemon have mirrored walk pairs");
+    } else {
+        for(unsigned image=0;image<232;image++)word(rom+0x1a8000+image*2,0x1000);
+        rom[0x1a91d0]=56;rom[0x1a91d1]=40;
+    }
+    word(ram+0xda,0x2000);word(ram+0x2000,128);
+    word(ram+0x2004,0x1000);word(ram+0x200a,88);
+    ram[0x200e]=56;ram[0x200f]=40;
+    word(ram+0x2016,0x3000);word(ram+0x2018,0x3010);ram[0x3007]=0xde;
+    unsigned images[]={26,39,51,65,77,87,95,108,121,218,219,223};
+    unsigned types[]={6,7,8,9,10,11,12,13,14,66,66,67};
+    uint16_t colors[256];for(unsigned i=0;i<256;i++)colors[i]=i*127;
+    DoomRotationsPalette(colors);
+    for(unsigned i=0;i<sizeof(images)/sizeof(*images);i++) {
+        ram[0x1017]=(uint8_t)images[i];
+        ram[0x1005]=(uint8_t)types[i];
+        unsigned resolved=0x81d0+DoomResolutionWord(rom+0x1a8000+images[i]*2);
+        word(ram+0x2012,resolved);
+        ram[0x200e]=rom[0x1a0000+resolved];ram[0x200f]=rom[0x1a0001+resolved];
+        for(unsigned r=0;r<8;r++) {
+            double a=r*3.14159265358979323846/4;
+            word(ram+0x22,(unsigned)(int)lround(100*cos(a)));
+            word(ram+0x24,(unsigned)(int)lround(100*sin(a)));
+            scene->sprite_count=0;
+            DoomResolutionCaptureSprites(scene,ram,65536,rom,0x200000);
+            CHECK(scene->sprite_count==1);
+            const DoomResolutionSprite *s=&scene->sprites[0];
+            CHECK(s->rotation==DoomRotationsPatch(images[i],r));
+            CHECK(s->width && s->height && s->height<=256);
+            const uint8_t *column=DoomResolutionSpriteColumn(scene,rom,0x200000,s,0);
+            CHECK(column);
+            DoomResolutionSprite expected=*s;
+            scene->sprite_count=0;
+            DoomResolutionCaptureSpritesMode(scene,ram,65536,rom,0x200000,false);
+            CHECK(scene->sprite_count==1 && !scene->sprites[0].rotation);
+            DoomResolutionRotateSprite(&scene->sprites[0],ram,65536,rom,0x200000);
+            CHECK(!memcmp(&expected,&scene->sprites[0],sizeof(expected)));
+        }
+    }
+    /* Every nonmatching object/frame combination keeps the resolved native
+     * sprite, including short fixed objects whose unrelated +23 byte looks
+     * exactly like an enemy frame. Reuse one identity/scene to catch stale
+     * replacements when an object changes to an explosion or a death frame. */
+    unsigned rejected=0;
+    for(unsigned type=0;type<70;type++)for(unsigned frame=0;frame<232;frame++) {
+        if(DoomRotationsObjectFrameAllowed(type,frame))continue;
+        ram[0x1005]=(uint8_t)type;ram[0x1017]=(uint8_t)frame;
+        unsigned resolved=0x81d0+DoomResolutionWord(rom+0x1a8000+frame*2);
+        word(ram+0x2012,resolved);ram[0x200e]=rom[0x1a0000+resolved];ram[0x200f]=rom[0x1a0001+resolved];
+        DoomResolutionCaptureSprites(scene,ram,65536,rom,0x200000);
+        const DoomResolutionSprite *s=&scene->sprites[0];
+        CHECK(scene->sprite_count==1 && !s->rotation && s->image==resolved);
+        CHECK(s->height==ram[0x200e] && s->width==ram[0x200f] && s->flip==ram[0x2015]);
+        rejected++;
+    }
+    ram[0x1005]=66;ram[0x1017]=218;
+    word(ram+0x2012,0x81d0+DoomResolutionWord(rom+0x1a8000+215*2));
+    if(!rom_path)word(ram+0x2012,0x9000);
+    DoomResolutionCaptureSprites(scene,ram,65536,rom,0x200000);
+    CHECK(!scene->sprites[0].rotation); // live object byte disagrees with resolved frame
+    printf("Rotation identity guard: %u wrong object/frame pairs retained native sprites\n",rejected);
+    DoomRotationsClear();free(scene);free(rom);free(ram);
+    puts("Imported rotations: all actors and projectiles select all eight directions through native object capture");
+}
+int main(int argc,char **argv) {
+    if(argc>=3)CheckImportedRotations(argv[1],argv[2],argc>=4?argv[3]:NULL);
     for(int i=-131072;i<=131072;i++) {
         double value=i/256.0;
         CHECK(DoomResolutionPixelFloor(value)==(int)floor(value));

@@ -3,10 +3,12 @@
 #include <stdlib.h>
 #include <string.h>
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"line %d: %s\n",__LINE__,#x);exit(1);}}while(0)
-static unsigned accepted;
+static unsigned accepted, observed_sreg;
 static void Word(uint8_t *p,unsigned a,unsigned v){p[a]=(uint8_t)v;p[a+1]=(uint8_t)(v>>8);}
 static void Observe(SuperFx *fx,uint32_t pc,void *unused) {
- (void)unused;accepted=pc==0x9e07;superfx_hook_redirect(fx,0xf800);
+ (void)unused;accepted=pc==0x9e07;
+ if(pc==0x9e69)observed_sreg=fx->sreg;
+ superfx_hook_redirect(fx,0xf800);
 }
 int main(int argc,char **argv) {
  CHECK(argc==2);uint8_t *rom=malloc(0x200000),*ram=malloc(65536),*expected=malloc(65536);CHECK(rom&&ram&&expected);
@@ -80,12 +82,15 @@ int main(int argc,char **argv) {
  CHECK(!memcmp(rom+0x1e2f,setup,sizeof(setup)));
  superfx_clear_pc_hooks(fx);CHECK(superfx_set_pc_hook(fx,0x9e69,Observe,NULL));cases=0;
  for(unsigned count=0;count<65536;count++)for(unsigned bank_index=0;bank_index<2;bank_index++) {
+  observed_sreg=~0u;
   unsigned bank=bank_index?0x5f:0x4f,root=(count*40503u+17u)&65535u;
   superfx_reset(fx);memset(expected,0xa5,65536);Word(expected,0x7c,0x8000);expected[0x7e]=(uint8_t)bank;Word(expected,0x80,root);Word(expected,0x18,count);
   memcpy(ram,expected,65536);Word(expected,0x17a,0x5b00);Word(expected,0x18,(count+1)&65535u);
   superfx_set_reg(fx,13,0x5b00);superfx_cpu_write_io(fx,0x301e,0x2f);superfx_cpu_write_io(fx,0x301f,0x9e);
   superfx_sync(fx,fx->master_clock+10000);CHECK(!superfx_is_running(fx));
-  if(memcmp(ram,expected,65536)||fx->rombr!=bank||superfx_reg(fx,9)!=0x7182||superfx_reg(fx,12)!=0x8000||superfx_reg(fx,1)!=root||superfx_reg(fx,13)!=((count+1)&65535u)||fx->sreg!=1) {
+  /* FROM R1 is the jump's delay slot. Observe its prefix at the hook:
+   * the artificial STOP used to end this fixture resets that prefix. */
+  if(memcmp(ram,expected,65536)||fx->rombr!=bank||superfx_reg(fx,9)!=0x7182||superfx_reg(fx,12)!=0x8000||superfx_reg(fx,1)!=root||superfx_reg(fx,13)!=((count+1)&65535u)||observed_sreg!=1||fx->sreg!=0) {
    fprintf(stderr,"radius LOS setup count=%04x bank=%02x root=%04x\n",count,bank,root);return 1;
   }
   cases++;

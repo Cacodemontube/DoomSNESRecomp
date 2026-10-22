@@ -2,6 +2,7 @@
 import argparse
 import pathlib
 import shutil
+import struct
 import subprocess
 import zipfile
 
@@ -55,6 +56,16 @@ else:
         if path.is_file() and (path.suffix.lower() in forbidden or path.name in personal):
             raise RuntimeError(f'Forbidden runtime file: {path}')
         if path.name=='gen' or path.name=='funcs.h':raise RuntimeError('Generated source in package')
+        if path.is_file() and (path.name.startswith(('DoomSNESconv','DoomSNESed')) or path.name=='DoomSNESAudio.dll'):
+            raise RuntimeError(f'Unexpected runtime file: {path}')
+    if a.platform.startswith('Windows'):
+        image=(stage/'DoomSNESRecomp.exe').read_bytes()
+        pe=struct.unpack_from('<I',image,0x3c)[0]
+        expected=0x8664 if a.platform=='Windows-x64' else 0x14c
+        if struct.unpack_from('<H',image,pe+4)[0]!=expected:
+            raise RuntimeError('Executable architecture does not match package')
+        if struct.unpack_from('<H',image,pe+24+68)[0]!=2:
+            raise RuntimeError('Public Windows executable must use the GUI subsystem')
     with zipfile.ZipFile(root/'dist'/f'{name}.zip','w',zipfile.ZIP_DEFLATED) as archive:
         for path in files:
             if path.is_file():archive.write(path,path.relative_to(stage.parent))
